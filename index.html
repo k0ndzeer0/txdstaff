@@ -2162,6 +2162,94 @@
         const dataCache = {};
         let cacheInitialized = false;
         
+        // Subscriptions de real-time
+        let realtimeSubscriptions = [];
+        
+        // Função para inicializar real-time
+        function initializeRealtime() {
+            if (!supabaseClient) {
+                console.warn('Supabase não inicializado. Real-time não disponível.');
+                return;
+            }
+            
+            // Limpar subscriptions antigas
+            realtimeSubscriptions.forEach(sub => {
+                try {
+                    supabaseClient.removeChannel(sub);
+                } catch (e) {
+                    console.warn('Erro ao remover subscription:', e);
+                }
+            });
+            realtimeSubscriptions = [];
+            
+            // Subscription para registration_requests
+            const regChannel = supabaseClient
+                .channel('registration_requests_changes')
+                .on('postgres_changes', 
+                    { event: '*', schema: 'public', table: 'registration_requests' },
+                    (payload) => {
+                        console.log('Mudança em registration_requests:', payload);
+                        // Limpar cache e recarregar
+                        delete dataCache['txd_registration_requests'];
+                        // Se estiver na seção de staff, recarregar
+                        if (currentSection === 'staff') {
+                            setTimeout(() => loadStaffControl(), 500);
+                        }
+                    }
+                )
+                .subscribe();
+            realtimeSubscriptions.push(regChannel);
+            
+            // Subscription para kanban
+            const kanbanCardsChannel = supabaseClient
+                .channel('kanban_cards_changes')
+                .on('postgres_changes',
+                    { event: '*', schema: 'public', table: 'kanban_cards' },
+                    (payload) => {
+                        console.log('Mudança em kanban_cards:', payload);
+                        delete dataCache['txd_kanban'];
+                        if (currentSection === 'tarefas') {
+                            setTimeout(() => loadKanban(), 500);
+                        }
+                    }
+                )
+                .subscribe();
+            realtimeSubscriptions.push(kanbanCardsChannel);
+            
+            const kanbanColumnsChannel = supabaseClient
+                .channel('kanban_columns_changes')
+                .on('postgres_changes',
+                    { event: '*', schema: 'public', table: 'kanban_columns' },
+                    (payload) => {
+                        console.log('Mudança em kanban_columns:', payload);
+                        delete dataCache['txd_kanban'];
+                        if (currentSection === 'tarefas') {
+                            setTimeout(() => loadKanban(), 500);
+                        }
+                    }
+                )
+                .subscribe();
+            realtimeSubscriptions.push(kanbanColumnsChannel);
+            
+            // Subscription para staff
+            const staffChannel = supabaseClient
+                .channel('staff_changes')
+                .on('postgres_changes',
+                    { event: '*', schema: 'public', table: 'staff' },
+                    (payload) => {
+                        console.log('Mudança em staff:', payload);
+                        delete dataCache['txd_staff'];
+                        if (currentSection === 'staff') {
+                            setTimeout(() => loadStaffControl(), 500);
+                        }
+                    }
+                )
+                .subscribe();
+            realtimeSubscriptions.push(staffChannel);
+            
+            console.log('✅ Real-time inicializado com sucesso!');
+        }
+        
         // Mapeamento de chaves localStorage para tabelas Supabase
         const keyToTableMap = {
             'txd_staff': 'staff',
@@ -2231,9 +2319,9 @@
             return obj;
         }
         
-        async function getData(key) {
-            // Se tem no cache, retorna imediatamente (compatibilidade síncrona)
-            if (dataCache[key] !== undefined) {
+        async function getData(key, forceRefresh = false) {
+            // Se não forçar refresh e tem no cache, retorna imediatamente
+            if (!forceRefresh && dataCache[key] !== undefined) {
                 return dataCache[key];
             }
             
@@ -2431,10 +2519,24 @@
                             const convertedCards = toCamelCase(cardsData || []);
                             data = {
                                 columns: convertedColumns,
-                                cards: convertedCards.map(card => ({
-                                    ...card,
-                                    assignees: (card.kanbanCardAssignees || []).map(a => a.assigneeName)
-                                }))
+                                cards: convertedCards.map(card => {
+                                    // Garantir que assignees seja um array
+                                    let assigneesArray = [];
+                                    if (card.kanbanCardAssignees && Array.isArray(card.kanbanCardAssignees)) {
+                                        assigneesArray = card.kanbanCardAssignees.map(a => a.assigneeName || a.assignee_name || a);
+                                    } else if (card.assignees && Array.isArray(card.assignees)) {
+                                        assigneesArray = card.assignees;
+                                    } else if (card.assignee && typeof card.assignee === 'string') {
+                                        assigneesArray = [card.assignee];
+                                    }
+                                    
+                                    return {
+                                        ...card,
+                                        assignees: assigneesArray,
+                                        // Garantir que columnId existe
+                                        columnId: card.columnId || card.column_id || 'todo'
+                                    };
+                                })
                             };
                         }
                         break;
@@ -2454,6 +2556,30 @@
                             .select('*')
                             .order('used_at', { ascending: false });
                         if (!usageError) data = toCamelCase(usageData || []);
+                        break;
+                        
+                    case 'txd_registration_requests':
+                        try {
+                            const { data: requestsData, error: requestsError } = await supabaseClient
+                                .from('registration_requests')
+                                .select('*')
+                                .order('requested_at', { ascending: false });
+                            if (!requestsError && requestsData) {
+                                data = toCamelCase(requestsData || []);
+                            } else if (requestsError) {
+                                // Se a tabela não existir (404), retornar array vazio
+                                if (requestsError.code === 'PGRST116' || requestsError.message?.includes('404')) {
+                                    console.warn('Tabela registration_requests não existe ainda. Execute o SQL de criação.');
+                                    data = [];
+                                } else {
+                                    console.error('Erro ao buscar registration_requests:', requestsError);
+                                    data = [];
+                                }
+                            }
+                        } catch (err) {
+                            console.error('Erro ao buscar registration_requests:', err);
+                            data = [];
+                        }
                         break;
                 }
                 
@@ -2679,6 +2805,38 @@
                         }
                         break;
                         
+                    case 'txd_registration_requests':
+                        if (Array.isArray(data)) {
+                            try {
+                                // Para cada request, fazer upsert
+                                for (const request of data) {
+                                    const convertedRequest = toSnakeCase(request);
+                                    const { error } = await supabaseClient
+                                        .from('registration_requests')
+                                        .upsert(convertedRequest, { onConflict: 'id' });
+                                    if (error) {
+                                        // Se a tabela não existir, mostrar mensagem útil
+                                        if (error.code === 'PGRST116' || error.message?.includes('404')) {
+                                            console.error('❌ ERRO: Tabela registration_requests não existe no Supabase!');
+                                            console.error('📋 Execute o SQL do arquivo: criar_tabela_registration_requests.sql');
+                                            alert('Erro: Tabela registration_requests não existe. Execute o SQL de criação no Supabase.');
+                                        } else {
+                                            console.error('Erro ao salvar registration_request:', error);
+                                        }
+                                        throw error;
+                                    }
+                                }
+                            } catch (err) {
+                                // Se for erro de tabela não encontrada, tentar criar via insert direto
+                                if (err.code === 'PGRST116' || err.message?.includes('404')) {
+                                    console.error('Tabela não existe. Por favor, execute o SQL de criação.');
+                                    throw new Error('Tabela registration_requests não existe. Execute criar_tabela_registration_requests.sql no Supabase.');
+                                }
+                                throw err;
+                            }
+                        }
+                        break;
+                        
                     case 'txd_kanban':
                         if (data && typeof data === 'object') {
                             // Salvar colunas
@@ -2691,9 +2849,19 @@
                             }
                             
                             // Salvar cards
-                            if (data.cards) {
+                            if (data.cards && Array.isArray(data.cards)) {
                                 for (const card of data.cards) {
-                                    const { assignees, ...cardData } = card;
+                                    if (!card || !card.id) {
+                                        console.warn('Card inválido ignorado:', card);
+                                        continue;
+                                    }
+                                    
+                                    const { assignees, assignee, ...cardData } = card;
+                                    
+                                    // Garantir que columnId existe
+                                    if (!cardData.columnId && !cardData.column_id) {
+                                        cardData.columnId = 'todo';
+                                    }
                                     
                                     // Converter card para snake_case
                                     const convertedCard = toSnakeCase(cardData);
@@ -2960,6 +3128,16 @@
                     // Mostrar dashboard
                 document.getElementById('loginScreen').style.display = 'none';
                 document.getElementById('dashboard').classList.add('active');
+                
+                // Inicializar real-time após login
+                if (supabaseClient && !cacheInitialized) {
+                    initializeRealtime();
+                    cacheInitialized = true;
+                }
+                
+                // Recarregar dados do Supabase
+                await refreshData();
+                
                 showSection('inicio');
                 
                 // Notificar Discord sobre login
@@ -3140,6 +3318,9 @@
 
         // ========== NAVEGAÇÃO ==========
         function showSection(section) {
+            // Atualizar seção atual para real-time
+            currentSection = section;
+            
             // Validar permissões antes de exibir a seção
             if (!canAccess(section)) {
                 // Mostrar mensagem de acesso negado
@@ -3363,6 +3544,8 @@
                 'task.edit': 'dashboard',
                 'task.delete': 'dashboard',
                 'task.view': 'dashboard',
+                // Permitir tarefas para todos que têm acesso ao dashboard ou qualquer permissão
+                'tasks': 'dashboard',
                 'staff.view': 'staff',
                 'staff.create': 'staff',
                 'staff.edit': 'staff',
@@ -3608,9 +3791,11 @@
             // Salvar dados corrigidos
             saveKanbanData(kanbanData);
             
-            const canCreate = hasPermission('task.create');
-            const canEdit = hasPermission('task.edit');
-            const canDelete = hasPermission('task.delete');
+            // Permitir acesso básico ao Kanban para todos os usuários logados
+            // Se não tiver permissão específica, permitir visualização e criação básica
+            const canCreate = hasPermission('task.create') || hasPermission('dashboard') || (currentUser && currentUser.role);
+            const canEdit = hasPermission('task.edit') || hasPermission('dashboard') || (currentUser && currentUser.role);
+            const canDelete = hasPermission('task.delete') || currentUser?.role === 'Owner' || currentUser?.role === 'CEO';
             
             const content = `
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
@@ -8004,8 +8189,9 @@ processDiscordCommand() diretamente.
         }
 
         // ========== SISTEMA KANBAN ==========
-        let draggedCard = null;
-        let draggedCardElement = null;
+        // Variáveis globais para drag and drop (declaradas mais abaixo)
+        // let draggedCard = null;
+        // let draggedCardElement = null;
 
         function getKanbanData() {
             let data = getData('txd_kanban');
@@ -8112,8 +8298,11 @@ processDiscordCommand() diretamente.
         }
 
         function openNewCard(columnId = null) {
-            if (!hasPermission('task.create')) {
-                alert('Você não tem permissão para criar tarefas.');
+            // Permitir criação para qualquer usuário logado (Kanban deve ser acessível)
+            // Se não tiver permissão específica, ainda permite criar
+            const canCreate = hasPermission('task.create') || hasPermission('dashboard') || currentUser?.role;
+            if (!canCreate) {
+                alert('Você precisa estar logado para criar tarefas.');
                 return;
             }
             
@@ -8160,8 +8349,10 @@ processDiscordCommand() diretamente.
         }
 
         function openEditCard(cardId) {
-            if (!hasPermission('task.edit')) {
-                alert('Você não tem permissão para editar tarefas. Apenas Owner, CEO, COO, Diretor e Head Staff podem editar.');
+            // Permitir edição para qualquer usuário logado
+            const canEdit = hasPermission('task.edit') || hasPermission('dashboard') || currentUser?.role;
+            if (!canEdit) {
+                alert('Você precisa estar logado para editar tarefas.');
                 return;
             }
             const kanbanData = getKanbanData();
@@ -8245,12 +8436,15 @@ processDiscordCommand() diretamente.
                 const cardId = cardIdInput.value;
                 const isEdit = cardId && cardId !== '';
                 
-                // Verificar permissões
-                if (isEdit && !hasPermission('task.edit')) {
+                // Verificar permissões (permitir para usuários logados)
+                const canEdit = hasPermission('task.edit') || hasPermission('dashboard') || currentUser?.role;
+                const canCreate = hasPermission('task.create') || hasPermission('dashboard') || currentUser?.role;
+                
+                if (isEdit && !canEdit) {
                     alert('Você não tem permissão para editar tarefas.');
                     return;
                 }
-                if (!isEdit && !hasPermission('task.create')) {
+                if (!isEdit && !canCreate) {
                     alert('Você não tem permissão para criar tarefas.');
                     return;
                 }
@@ -8350,8 +8544,10 @@ processDiscordCommand() diretamente.
         }
 
         function deleteCard(cardId) {
-            if (!hasPermission('task.delete')) {
-                alert('Você não tem permissão para excluir tarefas. Apenas Owner, CEO, COO, Diretor e Head Staff podem excluir.');
+            // Permitir exclusão para usuários com permissão ou Owner/CEO
+            const canDelete = hasPermission('task.delete') || currentUser?.role === 'Owner' || currentUser?.role === 'CEO';
+            if (!canDelete) {
+                alert('Você não tem permissão para excluir tarefas.');
                 return;
             }
             if (!confirm('Tem certeza que deseja excluir esta tarefa?')) return;
@@ -8389,18 +8585,32 @@ processDiscordCommand() diretamente.
         }
 
         // Drag and Drop
+        let draggedCard = null;
+        let draggedCardElement = null;
+        
         function handleDragStart(event) {
-            draggedCard = event.target;
-            draggedCardElement = event.target;
-            event.target.style.opacity = '0.5';
-            event.target.classList.add('dragging');
+            // Encontrar o card correto (pode ser clicado em um elemento filho)
+            const cardElement = event.target.closest('.kanban-card');
+            if (!cardElement) {
+                event.preventDefault();
+                return;
+            }
+            
+            draggedCard = cardElement;
+            draggedCardElement = cardElement;
+            cardElement.style.opacity = '0.5';
+            cardElement.classList.add('dragging');
             event.dataTransfer.effectAllowed = 'move';
-            event.dataTransfer.setData('text/html', event.target.outerHTML);
+            event.dataTransfer.setData('text/html', cardElement.outerHTML);
         }
 
         function handleDragEnd(event) {
-            event.target.style.opacity = '1';
-            event.target.classList.remove('dragging');
+            // Encontrar o card correto
+            const cardElement = event.target.closest('.kanban-card') || event.target;
+            if (cardElement) {
+                cardElement.style.opacity = '1';
+                cardElement.classList.remove('dragging');
+            }
         }
 
         function initializeKanbanDragDrop() {
@@ -8524,21 +8734,26 @@ processDiscordCommand() diretamente.
             }
         });
 
+        // Variável global para rastrear seção atual
+        let currentSection = 'inicio';
+        
         // Carregar dados do localStorage ao iniciar
         async function refreshData() {
             try {
-                // Carregar todos os dados do Supabase
-                const [staff, events, announcements, tickets, messages, groups, commands, favorites, usage, discord] = await Promise.all([
-                    getData('txd_staff'),
-                    getData('txd_events'),
-                    getData('txd_announcements'),
-                    getData('txd_tickets'),
-                    getData('txd_chat_messages'),
-                    getData('txd_chat_groups'),
-                    getData('txd_commands'),
-                    getData('txd_favorite_commands'),
-                    getData('txd_command_usage'),
-                    getData('txd_discord_config')
+                // Carregar todos os dados do Supabase (forçar refresh)
+                const [staff, events, announcements, tickets, messages, groups, commands, favorites, usage, discord, requests, kanban] = await Promise.all([
+                    getData('txd_staff', true),
+                    getData('txd_events', true),
+                    getData('txd_announcements', true),
+                    getData('txd_tickets', true),
+                    getData('txd_chat_messages', true),
+                    getData('txd_chat_groups', true),
+                    getData('txd_commands', true),
+                    getData('txd_favorite_commands', true),
+                    getData('txd_command_usage', true),
+                    getData('txd_discord_config', true),
+                    getData('txd_registration_requests', true),
+                    getData('txd_kanban', true)
                 ]);
                 
                 // Atualizar variáveis globais
@@ -8554,6 +8769,12 @@ processDiscordCommand() diretamente.
                 discordConfig = discord || getDiscordConfig();
                 
                 updateChatNotificationBadge();
+                
+                // Inicializar real-time após primeiro carregamento
+                if (!cacheInitialized && supabaseClient) {
+                    initializeRealtime();
+                    cacheInitialized = true;
+                }
             } catch (error) {
                 console.error('Erro ao atualizar dados:', error);
             }
