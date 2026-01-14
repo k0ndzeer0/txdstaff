@@ -2177,7 +2177,11 @@
             'txd_events': 'events',
             'txd_tickets': 'tickets',
             'txd_announcements': 'announcements',
-            'txd_kanban': 'kanban'
+            'txd_kanban': 'kanban',
+            'txd_system_logs': 'system_logs',
+            'txd_system_settings': 'system_settings',
+            'txd_security_settings': 'security_settings',
+            'txd_registration_requests': 'registration_requests'
         };
         
         // ========== FUNÇÕES SUPABASE ==========
@@ -2702,22 +2706,41 @@
                                         .single();
                                     if (cardError) throw cardError;
                                     
-                                    // Deletar assignees antigos
-                                    await supabaseClient
+                                    // Deletar assignees antigos primeiro
+                                    const { error: deleteError } = await supabaseClient
                                         .from('kanban_card_assignees')
                                         .delete()
                                         .eq('card_id', savedCard.id);
+                                    if (deleteError) {
+                                        console.warn('Aviso ao deletar assignees antigos (pode ser normal):', deleteError.message);
+                                        // Continuar mesmo se houver erro ao deletar (pode não existir ainda)
+                                    }
                                     
-                                    // Inserir novos assignees
-                                    if (assignees && assignees.length > 0) {
-                                        const assigneesData = assignees.map(name => ({
+                                    // Aguardar um pouco para garantir que a deleção foi processada
+                                    await new Promise(resolve => setTimeout(resolve, 50));
+                                    
+                                    // Inserir novos assignees (apenas se houver e não estiverem duplicados)
+                                    if (assignees && Array.isArray(assignees) && assignees.length > 0) {
+                                        // Remover duplicatas e valores vazios/null
+                                        const uniqueAssignees = [...new Set(assignees.filter(name => name && typeof name === 'string' && name.trim() !== ''))];
+                                        
+                                        if (uniqueAssignees.length > 0) {
+                                            const assigneesData = uniqueAssignees.map(name => ({
                                             card_id: savedCard.id,
-                                            assignee_name: name
+                                                assignee_name: name.trim()
                                         }));
+                                            
+                                            // Usar upsert para evitar duplicatas
                                         const { error: assigneesError } = await supabaseClient
                                             .from('kanban_card_assignees')
-                                            .insert(assigneesData);
-                                        if (assigneesError) throw assigneesError;
+                                                .upsert(assigneesData, { 
+                                                    onConflict: 'card_id,assignee_name'
+                                                });
+                                            if (assigneesError) {
+                                                console.warn('Aviso ao salvar assignees (continuando mesmo assim):', assigneesError.message);
+                                                // Não lançar erro para não quebrar o salvamento do card principal
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2780,13 +2803,161 @@
         initializeCache();
         
         // ========== SISTEMA DE LOGIN ==========
-        function handleLogin(event) {
+        // Usuários pré-configurados com acesso total
+        const PRECONFIGURED_USERS = {
+            'romanov': {
+                password: '5875',
+                name: 'Romanov',
+                role: 'Owner',
+                id: 999,
+                email: 'romanov@txd.staff',
+                status: 'Ativo'
+            }
+        };
+
+        async function handleLogin(event) {
             event.preventDefault();
-            const username = document.getElementById('loginUsername').value;
+            const username = document.getElementById('loginUsername').value.trim();
             const password = document.getElementById('loginPassword').value;
             
             if (username && password) {
-                // Simular login (sem validação real por enquanto)
+                try {
+                    let userFound = null;
+                    
+                    // 1. Verificar usuários pré-configurados primeiro
+                    const lowerUsername = username.toLowerCase();
+                    if (PRECONFIGURED_USERS[lowerUsername]) {
+                        const preUser = PRECONFIGURED_USERS[lowerUsername];
+                        if (password === preUser.password) {
+                            userFound = { ...preUser };
+                        } else {
+                            alert('Senha incorreta para este usuário.');
+                            return;
+                        }
+                    }
+                    
+                    // 2. Se não for pré-configurado, buscar no Supabase
+                    if (!userFound && supabaseClient) {
+                        const { data: staffData, error } = await supabaseClient
+                            .from('staff')
+                            .select('*')
+                            .ilike('name', `%${username}%`)
+                            .limit(1);
+                        
+                        if (!error && staffData && Array.isArray(staffData) && staffData.length > 0) {
+                            const foundUser = staffData[0];
+                            // Verificar se o usuário está aprovado
+                            if (foundUser.status === 'Ativo' || foundUser.status === 'ativo') {
+                                userFound = foundUser;
+                            } else {
+                                alert('Sua conta ainda não foi aprovada. Aguarde a aprovação de um administrador.');
+                                return;
+                            }
+                        }
+                    }
+                    
+                    // 3. Se não encontrou no Supabase, buscar no localStorage
+                    if (!userFound) {
+                        const staffDataRaw = getData('txd_staff');
+                        // Garantir que seja sempre um array
+                        const staffData = Array.isArray(staffDataRaw) ? staffDataRaw : [];
+                        
+                        if (staffData.length > 0) {
+                            const foundUser = staffData.find(s => 
+                                s && s.name && s.name.toLowerCase().includes(username.toLowerCase())
+                            );
+                            
+                            if (foundUser) {
+                                // Verificar se o usuário está aprovado
+                                if (foundUser.status === 'Ativo' || foundUser.status === 'ativo') {
+                                    // Verificar senha se existir
+                                    if (foundUser.password && foundUser.password !== password) {
+                                        alert('Senha incorreta.');
+                                        return;
+                                    }
+                                    userFound = foundUser;
+                                } else {
+                                    alert('Sua conta ainda não foi aprovada. Aguarde a aprovação de um administrador.');
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 4. Verificar se há solicitação aprovada pendente
+                    if (!userFound) {
+                        const requestsRaw = getData('txd_registration_requests');
+                        const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
+                        
+                        const approvedRequest = requests.find(r => 
+                            r && 
+                            r.username && 
+                            r.username.toLowerCase() === username.toLowerCase() && 
+                            r.status === 'approved'
+                        );
+                        
+                        if (approvedRequest) {
+                            // Verificar senha
+                            if (approvedRequest.password === password) {
+                                // Criar usuário a partir da solicitação aprovada
+                                userFound = {
+                                    id: Date.now(),
+                                    name: approvedRequest.username,
+                                    displayName: approvedRequest.displayName,
+                                    role: approvedRequest.role || 'Helper', // Cargo padrão
+                                    email: approvedRequest.email || null,
+                                    status: 'Ativo',
+                                    password: approvedRequest.password,
+                                    createdAt: new Date().toISOString()
+                                };
+                                
+                                // Adicionar ao staff
+                                const staffData = getData('txd_staff') || [];
+                                staffData.push(userFound);
+                                await saveData('txd_staff', staffData);
+                                
+                                // Marcar solicitação como processada
+                                approvedRequest.status = 'processed';
+                                await saveData('txd_registration_requests', requests);
+                            } else {
+                                alert('Senha incorreta.');
+                                return;
+                            }
+                        } else {
+                            // Verificar se há solicitação pendente
+                            const pendingRequest = requests.find(r => 
+                                r && 
+                                r.username && 
+                                r.username.toLowerCase() === username.toLowerCase() && 
+                                r.status === 'pending'
+                            );
+                            
+                            if (pendingRequest) {
+                                alert('Sua solicitação de cadastro ainda está pendente de aprovação. Aguarde a análise de um administrador.');
+                                return;
+                            }
+                            
+                            // Se não encontrou nada, informar que precisa se cadastrar
+                            alert('Usuário não encontrado. Por favor, crie uma conta primeiro.');
+                            return;
+                        }
+                    }
+                    
+                    // Definir usuário atual
+                    currentUser = {
+                        id: userFound.id || 1,
+                        name: userFound.name || username,
+                        role: userFound.role || 'Owner',
+                        email: userFound.email || null,
+                        displayName: userFound.name || username,
+                        status: userFound.status || 'Ativo'
+                    };
+                    
+                    // Aplicar permissões ao menu
+                    const permissions = getUserPermissions(currentUser.role);
+                    applyPermissionsToMenu(permissions);
+                    
+                    // Mostrar dashboard
                 document.getElementById('loginScreen').style.display = 'none';
                 document.getElementById('dashboard').classList.add('active');
                 showSection('inicio');
@@ -2811,6 +2982,11 @@
                     chatMessages = getData('txd_chat_messages') || [];
                     updateChatNotificationBadge();
                 }, 10000);
+                    
+                } catch (error) {
+                    console.error('Erro no login:', error);
+                    alert('Erro ao fazer login. Tente novamente.');
+                }
             }
         }
 
@@ -2822,7 +2998,111 @@
             document.getElementById(modalId).classList.remove('active');
         }
 
+        // ========== SISTEMA DE REGISTRO E APROVAÇÃO ==========
+        
+        async function handleRegister() {
+            const form = document.getElementById('registerForm');
+            const inputs = form.querySelectorAll('input');
+            
+            const username = inputs[0].value.trim();
+            const displayName = inputs[1].value.trim();
+            const password = inputs[2].value;
+            const confirmPassword = inputs[3].value;
+            
+            // Validações
+            if (!username || !displayName || !password || !confirmPassword) {
+                alert('Por favor, preencha todos os campos.');
+                return;
+            }
+            
+            if (password !== confirmPassword) {
+                alert('As senhas não coincidem.');
+                return;
+            }
+            
+            if (password.length < 4) {
+                alert('A senha deve ter pelo menos 4 caracteres.');
+                return;
+            }
+            
+            // Verificar se o usuário já existe
+            const existingStaff = getData('txd_staff') || [];
+            const existingRequest = getData('txd_registration_requests') || [];
+            
+            if (Array.isArray(existingStaff) && existingStaff.some(s => s && s.name && s.name.toLowerCase() === username.toLowerCase())) {
+                alert('Este usuário já está cadastrado no sistema.');
+                return;
+            }
+            
+            if (Array.isArray(existingRequest) && existingRequest.some(r => r && r.username && r.username.toLowerCase() === username.toLowerCase() && r.status === 'pending')) {
+                alert('Você já possui uma solicitação pendente. Aguarde a aprovação.');
+                return;
+            }
+            
+            try {
+                // Criar solicitação de registro
+                const request = {
+                    id: Date.now(),
+                    username: username,
+                    displayName: displayName,
+                    password: password, // Em produção, isso deve ser criptografado
+                    status: 'pending', // pending, approved, rejected
+                    requestedAt: new Date().toISOString(),
+                    requestedBy: username,
+                    approvedBy: null,
+                    approvedAt: null,
+                    rejectionReason: null
+                };
+                
+                // Salvar solicitação
+                const requests = Array.isArray(existingRequest) ? existingRequest : [];
+                requests.push(request);
+                await saveData('txd_registration_requests', requests);
+                
+                // Notificar Discord
+                sendDiscordNotification('staff', '📝 Nova Solicitação de Cadastro', 
+                    `Nova solicitação de cadastro recebida`,
+                    [
+                        { name: '👤 Usuário', value: username, inline: true },
+                        { name: '📛 Nome', value: displayName, inline: true },
+                        { name: '🕐 Data', value: new Date().toLocaleString('pt-BR'), inline: true },
+                        { name: '⚠️ Ação Necessária', value: 'Aprovar ou rejeitar no painel administrativo', inline: false }
+                    ]
+                );
+                
+                // Fechar modal e mostrar mensagem
+                closeModal('registerModal');
+                alert('✅ Solicitação de cadastro enviada com sucesso!\n\nAguarde a aprovação de um administrador. Você receberá uma notificação quando sua solicitação for analisada.');
+                
+                // Limpar formulário
+                form.reset();
+                
+            } catch (error) {
+                console.error('Erro ao criar solicitação:', error);
+                alert('Erro ao enviar solicitação. Tente novamente.');
+            }
+        }
+
         function showTerms() {
+            // Validar formulário antes de mostrar termos
+            const form = document.getElementById('registerForm');
+            const inputs = form.querySelectorAll('input');
+            
+            const username = inputs[0].value.trim();
+            const displayName = inputs[1].value.trim();
+            const password = inputs[2].value;
+            const confirmPassword = inputs[3].value;
+            
+            if (!username || !displayName || !password || !confirmPassword) {
+                alert('Por favor, preencha todos os campos antes de prosseguir.');
+                return;
+            }
+            
+            if (password !== confirmPassword) {
+                alert('As senhas não coincidem.');
+                return;
+            }
+            
             closeModal('registerModal');
             document.getElementById('termsModal').classList.add('active');
         }
@@ -2834,10 +3114,9 @@
         }
 
         function acceptTerms() {
+            // Processar registro após aceitar termos
+            handleRegister();
             closeModal('termsModal');
-            document.getElementById('loginScreen').style.display = 'none';
-            document.getElementById('dashboard').classList.add('active');
-            showSection('inicio');
         }
 
         function logout() {
@@ -2861,9 +3140,45 @@
 
         // ========== NAVEGAÇÃO ==========
         function showSection(section) {
+            // Validar permissões antes de exibir a seção
+            if (!canAccess(section)) {
+                // Mostrar mensagem de acesso negado
+                const contentCard = document.querySelector('.content-card');
+                if (contentCard) {
+                    contentCard.innerHTML = `
+                        <div style="text-align: center; padding: 48px 24px;">
+                            <div style="font-size: 64px; margin-bottom: 24px;">🔒</div>
+                            <h1 style="color: var(--white-soft); margin-bottom: 16px;">Acesso não autorizado</h1>
+                            <p style="color: var(--gray-light); margin-bottom: 32px;">
+                                Você não tem permissão para acessar esta seção.
+                            </p>
+                            <p style="color: var(--gray-text); font-size: 14px;">
+                                Cargo atual: <strong>${currentUser?.role || 'N/A'}</strong>
+                            </p>
+                            <button class="btn btn-primary" onclick="showSection('inicio')" style="margin-top: 24px;">
+                                <i class="fas fa-home"></i> Voltar ao Início
+                            </button>
+                        </div>
+                    `;
+                }
+                
+                // Atualizar título
+                document.getElementById('sectionTitle').textContent = 'Acesso Negado';
+                
+                // Atualizar menu ativo (remover ativo de todos)
+                document.querySelectorAll('.nav-menu a').forEach(link => {
+                    link.classList.remove('active');
+                });
+                
+                return; // Bloquear acesso
+            }
+            
             const titles = {
                 'inicio': 'Início',
                 'tarefas': 'Tarefas - Kanban',
+                'chat': '💬 Chat',
+                'ranking': '📊 Ranking',
+                'conquistas': '🏆 Conquistas',
                 'comandos': 'Comandos',
                 'controle': 'Controle de Staff',
                 'areas': 'Áreas de Responsabilidade',
@@ -2886,265 +3201,202 @@
 
         // ========== FUNCIONALIDADES ==========
         
-        // ========== SISTEMA COMPLETO DE PERMISSÕES POR CARGO ==========
+        // ========== SISTEMA DE PERMISSÕES POR CARGO (RBAC) - PASSO 2 ==========
         
-        // Definição de todas as permissões disponíveis no sistema
-        const ALL_PERMISSIONS = {
-            // Staff Management
-            'staff.view': 'Visualizar membros da staff',
-            'staff.create': 'Adicionar novos membros',
-            'staff.edit': 'Editar membros existentes',
-            'staff.delete': 'Remover membros',
-            'staff.manage_roles': 'Gerenciar cargos e hierarquia',
-            
-            // Tasks (Kanban)
-            'task.view': 'Visualizar tarefas',
-            'task.create': 'Criar novas tarefas',
-            'task.edit': 'Editar tarefas existentes',
-            'task.delete': 'Excluir tarefas',
-            'task.assign': 'Atribuir tarefas a membros',
-            
-            // Events (Agenda)
-            'event.view': 'Visualizar eventos',
-            'event.create': 'Criar novos eventos',
-            'event.edit': 'Editar eventos existentes',
-            'event.delete': 'Excluir eventos',
-            
-            // Announcements
-            'announcement.view': 'Visualizar avisos',
-            'announcement.create': 'Criar avisos',
-            'announcement.edit': 'Editar avisos',
-            'announcement.delete': 'Excluir avisos',
-            
-            // Tickets & Support
-            'ticket.view': 'Visualizar tickets',
-            'ticket.create': 'Criar tickets',
-            'ticket.edit': 'Editar tickets',
-            'ticket.delete': 'Excluir tickets',
-            'ticket.assign': 'Atribuir tickets',
-            'ticket.resolve': 'Resolver tickets',
-            
-            // Warnings
-            'warning.view': 'Visualizar advertências',
-            'warning.create': 'Criar advertências',
-            'warning.edit': 'Editar advertências',
-            'warning.delete': 'Excluir advertências',
-            
-            // Reports
-            'report.view': 'Visualizar relatórios',
-            'report.create': 'Criar relatórios',
-            'report.edit': 'Editar relatórios',
-            'report.delete': 'Excluir relatórios',
-            
-            // Forms
-            'form.view': 'Visualizar formulários',
-            'form.review': 'Revisar formulários',
-            'form.approve': 'Aprovar formulários',
-            'form.reject': 'Rejeitar formulários',
-            
-            // Areas
-            'area.view': 'Visualizar áreas',
-            'area.create': 'Criar áreas',
-            'area.edit': 'Editar áreas',
-            'area.delete': 'Excluir áreas',
-            
-            // System
-            'system.config': 'Acessar configurações do sistema',
-            'system.sync': 'Sincronizar sistema',
-            'system.logs': 'Visualizar logs do sistema',
-            'system.backup': 'Fazer backup do sistema',
-            
-            // Permissions
-            'permission.view': 'Visualizar permissões',
-            'permission.manage': 'Gerenciar permissões de cargos',
-            
-            // Special
-            'all': 'Acesso total ao sistema'
+        // Mapeamento de seções do menu para permissões
+        const SECTION_PERMISSIONS = {
+            'inicio': '*', // Sempre acessível
+            'tarefas': 'dashboard',
+            'chat': 'chat', // Chat específico ou suporte
+            'ranking': 'dashboard',
+            'conquistas': 'dashboard',
+            'comandos': 'comandos',
+            'controle': 'staff', // Staff ou staff_area
+            'areas': 'area', // Area ou staff_area
+            'advertencias': 'moderacao',
+            'agenda': 'dashboard',
+            'formularios': 'tickets', // Tickets ou tickets_basico
+            'relatorios': 'relatorios',
+            'config': 'sistema' // Sistema, config ou logs
         };
 
-        // Matriz de permissões por cargo
+        // Permissões por cargo (formato simplificado conforme prompt)
         const ROLE_PERMISSIONS = {
-            'Owner': {
-                permissions: ['all'],
-                description: 'Acesso total ao sistema'
-            },
-            'CEO': {
-                permissions: ['all'],
-                description: 'Acesso total ao sistema'
-            },
-            'COO': {
-                permissions: [
-                    'staff.view', 'staff.create', 'staff.edit', 'staff.delete',
-                    'task.view', 'task.create', 'task.edit', 'task.delete', 'task.assign',
-                    'event.view', 'event.create', 'event.edit', 'event.delete',
-                    'announcement.view', 'announcement.create', 'announcement.edit', 'announcement.delete',
-                    'ticket.view', 'ticket.create', 'ticket.edit', 'ticket.assign', 'ticket.resolve',
-                    'warning.view', 'warning.create', 'warning.edit',
-                    'report.view', 'report.create', 'report.edit',
-                    'form.view', 'form.review', 'form.approve', 'form.reject',
-                    'area.view', 'area.create', 'area.edit',
-                    'system.config', 'system.sync', 'permission.view'
-                ],
-                description: 'Acesso administrativo completo, exceto logs e backup'
-            },
-            'CMO': {
-                permissions: [
-                    'staff.view',
-                    'task.view', 'task.create',
-                    'event.view', 'event.create',
-                    'announcement.view', 'announcement.create',
-                    'ticket.view', 'ticket.create',
-                    'report.view', 'report.create',
-                    'form.view', 'form.review',
-                    'area.view'
-                ],
-                description: 'Foco em comunicação e marketing'
-            },
-            'CCO': {
-                permissions: [
-                    'staff.view',
-                    'task.view', 'task.create',
-                    'event.view', 'event.create',
-                    'announcement.view', 'announcement.create',
-                    'ticket.view', 'ticket.create',
-                    'report.view', 'report.create',
-                    'form.view', 'form.review',
-                    'area.view'
-                ],
-                description: 'Foco em comunidade e atendimento'
-            },
-            'CIO': {
-                permissions: [
-                    'staff.view',
-                    'task.view', 'task.create',
-                    'event.view', 'event.create',
-                    'ticket.view', 'ticket.create',
-                    'report.view',
-                    'system.config', 'system.logs'
-                ],
-                description: 'Foco em tecnologia e sistemas'
-            },
-            'Diretor': {
-                permissions: [
-                    'staff.view', 'staff.edit',
-                    'task.view', 'task.create', 'task.edit', 'task.delete', 'task.assign',
-                    'event.view', 'event.create', 'event.edit', 'event.delete',
-                    'announcement.view', 'announcement.create', 'announcement.edit',
-                    'ticket.view', 'ticket.create', 'ticket.edit', 'ticket.assign', 'ticket.resolve',
-                    'warning.view', 'warning.create', 'warning.edit',
-                    'report.view', 'report.create', 'report.edit',
-                    'form.view', 'form.review', 'form.approve', 'form.reject',
-                    'area.view', 'area.create', 'area.edit'
-                ],
-                description: 'Acesso gerencial completo em sua área'
-            },
-            'Head Staff': {
-                permissions: [
-                    'staff.view', 'staff.edit',
-                    'task.view', 'task.create', 'task.edit', 'task.delete', 'task.assign',
-                    'event.view', 'event.create', 'event.edit',
-                    'announcement.view', 'announcement.create',
-                    'ticket.view', 'ticket.create', 'ticket.edit', 'ticket.assign', 'ticket.resolve',
-                    'warning.view', 'warning.create', 'warning.edit',
-                    'report.view', 'report.create',
-                    'form.view', 'form.review',
-                    'area.view'
-                ],
-                description: 'Liderança operacional da staff'
-            },
-            'Coordenador': {
-                permissions: [
-                    'staff.view',
-                    'task.view', 'task.create',
-                    'event.view', 'event.create',
-                    'announcement.view', 'announcement.create',
-                    'ticket.view', 'ticket.create', 'ticket.edit', 'ticket.resolve',
-                    'warning.view', 'warning.create',
-                    'report.view', 'report.create',
-                    'form.view', 'form.review',
-                    'area.view'
-                ],
-                description: 'Coordenação de equipes e processos'
-            },
-            'Admin': {
-                permissions: [
-                    'staff.view',
-                    'task.view',
-                    'event.view',
-                    'announcement.view',
-                    'ticket.view', 'ticket.create', 'ticket.edit', 'ticket.resolve',
-                    'warning.view',
-                    'report.view',
-                    'form.view',
-                    'area.view'
-                ],
-                description: 'Acesso administrativo básico'
-            },
-            'Moderador': {
-                permissions: [
-                    'staff.view',
-                    'task.view',
-                    'ticket.view', 'ticket.create', 'ticket.edit', 'ticket.resolve',
-                    'warning.view', 'warning.create',
-                    'form.view',
-                    'area.view'
-                ],
-                description: 'Moderação e atendimento'
-            },
-            'Suporte': {
-                permissions: [
-                    'staff.view',
-                    'task.view',
-                    'ticket.view', 'ticket.create', 'ticket.edit', 'ticket.resolve',
-                    'form.view',
-                    'area.view'
-                ],
-                description: 'Atendimento e suporte'
-            },
-            'Helper': {
-                permissions: [
-                    'staff.view',
-                    'task.view',
-                    'ticket.view', 'ticket.create',
-                    'form.view',
-                    'area.view'
-                ],
-                description: 'Auxílio e suporte básico'
-            },
-            'Dev': {
-                permissions: [
-                    'staff.view',
-                    'task.view', 'task.create',
-                    'event.view',
-                    'ticket.view', 'ticket.create',
-                    'system.config', 'system.logs'
-                ],
-                description: 'Desenvolvimento e manutenção técnica'
-            }
+            // Sistema Principal (C-Level)
+            'Owner': ['*'],
+            'CEO': ['*'],
+            'COO': ['dashboard', 'staff', 'relatorios'],
+            'CMO': ['marketing', 'relatorios'],
+            'CCO': ['suporte', 'tickets', 'chat'],
+            'CIO': ['sistema', 'logs', 'config'],
+            
+            // Sistema Secundário (Operacional)
+            'HeadStaff': ['dashboard', 'staff', 'tickets', 'moderacao'],
+            'Diretor': ['dashboard', 'area'],
+            'Coordenador': ['tickets', 'staff_area'],
+            'Admin': ['tickets', 'moderacao', 'comandos'],
+            'Moderador': ['tickets', 'moderacao'],
+            'Suporte': ['tickets'],
+            'Helper': ['tickets_basico'],
+            'Dev': ['sistema']
         };
 
         // Usuário atual (será definido no login)
         let currentUser = { role: 'Owner', name: 'Admin', id: 1 };
 
-        // Função principal para verificar permissões
+        // ========== FUNÇÕES DE PERMISSÕES ==========
+        
+        /**
+         * Obtém as permissões do cargo do usuário
+         * @param {string} role - Cargo do usuário
+         * @returns {Array} Array de permissões
+         */
+        function getUserPermissions(role) {
+            if (!role) return [];
+            return ROLE_PERMISSIONS[role] || [];
+        }
+
+        /**
+         * Verifica se o usuário tem acesso a uma seção específica
+         * @param {string} section - Nome da seção (ex: 'tarefas', 'controle')
+         * @returns {boolean} true se tem acesso, false caso contrário
+         */
+        function canAccess(section) {
+            if (!currentUser || !currentUser.role) {
+                return false;
+            }
+
+            // Seção 'inicio' sempre acessível
+            if (section === 'inicio') {
+                return true;
+            }
+
+            const userPermissions = getUserPermissions(currentUser.role);
+            
+            // Se tem '*', tem acesso total
+            if (userPermissions.includes('*')) {
+                return true;
+            }
+
+            // Obter permissão necessária para a seção
+            const requiredPermission = SECTION_PERMISSIONS[section];
+            if (!requiredPermission) {
+                return false; // Seção não mapeada, negar acesso por segurança
+            }
+
+            // Se a seção requer '*', apenas usuários com '*' podem acessar
+            if (requiredPermission === '*') {
+                return userPermissions.includes('*');
+            }
+
+            // Verificar se tem a permissão específica ou uma permissão relacionada
+            // Mapeamento flexível para permissões relacionadas
+            const permissionMap = {
+                'dashboard': ['dashboard'],
+                'staff': ['staff', 'staff_area'],
+                'tickets': ['tickets', 'tickets_basico', 'suporte'],
+                'moderacao': ['moderacao'],
+                'comandos': ['comandos'],
+                'relatorios': ['relatorios'],
+                'sistema': ['sistema', 'config', 'logs'],
+                'area': ['area', 'staff_area'],
+                'marketing': ['marketing'],
+                'chat': ['chat', 'suporte', 'dashboard'], // Chat pode ser acessado por suporte ou dashboard
+                'tickets_basico': ['tickets_basico', 'tickets', 'suporte']
+            };
+
+            // Verificar permissão direta
+            if (userPermissions.includes(requiredPermission)) {
+                return true;
+            }
+
+            // Verificar permissões relacionadas
+            const relatedPermissions = permissionMap[requiredPermission] || [];
+            return relatedPermissions.some(perm => userPermissions.includes(perm));
+        }
+
+        /**
+         * Aplica permissões ao menu, ocultando itens não permitidos
+         * @param {Array} permissions - Array de permissões do usuário
+         */
+        function applyPermissionsToMenu(permissions) {
+            const menuItems = document.querySelectorAll('.nav-menu li');
+            
+            menuItems.forEach(item => {
+                const link = item.querySelector('a');
+                if (!link) return;
+
+                // Extrair nome da seção do onclick
+                const onclickAttr = link.getAttribute('onclick');
+                if (!onclickAttr) return;
+
+                const sectionMatch = onclickAttr.match(/showSection\(['"]([^'"]+)['"]\)/);
+                if (!sectionMatch) return;
+
+                const section = sectionMatch[1];
+                
+                // Verificar se tem acesso
+                if (!canAccess(section)) {
+                    item.classList.add('hidden');
+                } else {
+                    item.classList.remove('hidden');
+                }
+            });
+        }
+
+        // Função de compatibilidade para código existente que usa hasPermission
         function hasPermission(action) {
             if (!currentUser || !currentUser.role) {
                 return false;
             }
             
-            const roleData = ROLE_PERMISSIONS[currentUser.role];
-            if (!roleData) {
-                return false;
-            }
+            const userPermissions = getUserPermissions(currentUser.role);
             
-            const userPermissions = roleData.permissions || [];
-            
-            // Se tem 'all', tem todas as permissões
-            if (userPermissions.includes('all')) {
+            // Se tem '*', tem todas as permissões
+            if (userPermissions.includes('*')) {
                 return true;
             }
             
-            return userPermissions.includes(action);
+            // Mapeamento de ações antigas para novas permissões
+            const actionToPermissionMap = {
+                'task.create': 'dashboard',
+                'task.edit': 'dashboard',
+                'task.delete': 'dashboard',
+                'task.view': 'dashboard',
+                'staff.view': 'staff',
+                'staff.create': 'staff',
+                'staff.edit': 'staff',
+                'staff.delete': 'staff',
+                'ticket.view': 'tickets',
+                'ticket.create': 'tickets',
+                'ticket.edit': 'tickets',
+                'ticket.resolve': 'tickets',
+                'system.config': 'sistema',
+                'system.logs': 'sistema',
+                'warning.view': 'moderacao',
+                'warning.create': 'moderacao',
+                'form.view': 'tickets',
+                'area.view': 'area',
+                'area.create': 'area',
+                'area.edit': 'area',
+                'report.view': 'relatorios',
+                'report.create': 'relatorios',
+                'event.view': 'dashboard',
+                'event.create': 'dashboard',
+                'announcement.view': 'dashboard',
+                'announcement.create': 'dashboard'
+            };
+
+            const mappedPermission = actionToPermissionMap[action];
+            if (mappedPermission) {
+                return userPermissions.includes(mappedPermission) || 
+                       userPermissions.includes('*') ||
+                       (mappedPermission === 'tickets' && userPermissions.includes('tickets_basico')) ||
+                       (mappedPermission === 'staff' && userPermissions.includes('staff_area')) ||
+                       (mappedPermission === 'area' && userPermissions.includes('staff_area'));
+            }
+
+            return false;
         }
 
         // Verificar múltiplas permissões (todas devem ser verdadeiras)
@@ -3157,26 +3409,14 @@
             return actions.some(action => hasPermission(action));
         }
 
-        // Obter todas as permissões do cargo atual
+        // Obter todas as permissões do cargo atual (compatibilidade)
         function getCurrentUserPermissions() {
-            if (!currentUser || !currentUser.role) {
-                return [];
-            }
-            
-            const roleData = ROLE_PERMISSIONS[currentUser.role];
-            return roleData ? roleData.permissions : [];
+            return getUserPermissions(currentUser?.role);
         }
 
         // Obter permissões de um cargo específico
         function getRolePermissions(role) {
-            const roleData = ROLE_PERMISSIONS[role];
-            return roleData ? roleData.permissions : [];
-        }
-
-        // Obter descrição de um cargo
-        function getRoleDescription(role) {
-            const roleData = ROLE_PERMISSIONS[role];
-            return roleData ? roleData.description : 'Sem descrição';
+            return getUserPermissions(role);
         }
 
         // Verificar se pode executar ação e mostrar erro se não puder
@@ -3193,7 +3433,7 @@
             const role = document.getElementById('staffRole')?.value;
             if (role) {
                 const rolePerms = getRolePermissions(role);
-                const roleDesc = getRoleDescription(role);
+                const roleDesc = getUserPermissions(role).includes('*') ? 'Acesso total' : `${getUserPermissions(role).length} permissões`;
                 console.log(`Permissões do cargo ${role}:`, rolePerms);
                 console.log(`Descrição: ${roleDesc}`);
             }
@@ -3332,6 +3572,42 @@
             refreshData();
             let kanbanData = getKanbanData();
             
+            // Validações robustas para garantir que os dados estão corretos
+            if (!kanbanData) {
+                kanbanData = {
+                    columns: [],
+                    cards: []
+                };
+            }
+            
+            // Garantir que cards é um array
+            if (!Array.isArray(kanbanData.cards)) {
+                kanbanData.cards = [];
+            }
+            
+            // Garantir que columns é um array
+            if (!Array.isArray(kanbanData.columns)) {
+                kanbanData.columns = [
+                    { id: 'todo', name: 'Para Fazer', color: '#6F7276' },
+                    { id: 'inprogress', name: 'Em Progresso', color: '#ffaa00' },
+                    { id: 'review', name: 'Em Revisão', color: '#3b82f6' },
+                    { id: 'done', name: 'Concluído', color: '#00ff88' }
+                ];
+            }
+            
+            // Se não há colunas, criar padrão
+            if (kanbanData.columns.length === 0) {
+                kanbanData.columns = [
+                    { id: 'todo', name: 'Para Fazer', color: '#6F7276' },
+                    { id: 'inprogress', name: 'Em Progresso', color: '#ffaa00' },
+                    { id: 'review', name: 'Em Revisão', color: '#3b82f6' },
+                    { id: 'done', name: 'Concluído', color: '#00ff88' }
+                ];
+            }
+            
+            // Salvar dados corrigidos
+            saveKanbanData(kanbanData);
+            
             const canCreate = hasPermission('task.create');
             const canEdit = hasPermission('task.edit');
             const canDelete = hasPermission('task.delete');
@@ -3356,7 +3632,7 @@
                             <div class="stat-card-title">Total de Tarefas</div>
                             <div class="stat-card-icon">📋</div>
                         </div>
-                        <div class="stat-card-value">${kanbanData.cards.length}</div>
+                        <div class="stat-card-value">${(kanbanData.cards || []).length}</div>
                         <div class="stat-card-subtitle">Todas as tarefas</div>
                     </div>
                     <div class="stat-card">
@@ -3364,7 +3640,7 @@
                             <div class="stat-card-title">Para Fazer</div>
                             <div class="stat-card-icon">📝</div>
                         </div>
-                        <div class="stat-card-value">${kanbanData.cards.filter(c => c.columnId === 'todo').length}</div>
+                        <div class="stat-card-value">${(kanbanData.cards || []).filter(c => c && c.columnId === 'todo').length}</div>
                         <div class="stat-card-subtitle">Pendentes</div>
                     </div>
                     <div class="stat-card">
@@ -3372,7 +3648,7 @@
                             <div class="stat-card-title">Em Progresso</div>
                             <div class="stat-card-icon">⚙️</div>
                         </div>
-                        <div class="stat-card-value">${kanbanData.cards.filter(c => c.columnId === 'inprogress').length}</div>
+                        <div class="stat-card-value">${(kanbanData.cards || []).filter(c => c && c.columnId === 'inprogress').length}</div>
                         <div class="stat-card-subtitle">Em andamento</div>
                     </div>
                     <div class="stat-card">
@@ -3380,7 +3656,7 @@
                             <div class="stat-card-title">Concluído</div>
                             <div class="stat-card-icon">✅</div>
                         </div>
-                        <div class="stat-card-value">${kanbanData.cards.filter(c => c.columnId === 'done').length}</div>
+                        <div class="stat-card-value">${(kanbanData.cards || []).filter(c => c && c.columnId === 'done').length}</div>
                         <div class="stat-card-subtitle">Finalizadas</div>
                     </div>
                 </div>
@@ -3395,11 +3671,11 @@
                                     ${column.name}
                                 </h3>
                                 <span style="background: ${column.color}20; color: ${column.color}; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;">
-                                    ${kanbanData.cards.filter(c => c.columnId === column.id).length}
+                                    ${(kanbanData.cards || []).filter(c => c && c.columnId === column.id).length}
                                 </span>
                             </div>
-                            <div class="kanban-cards" data-column="${column.id}" style="min-height: 400px;">
-                                ${kanbanData.cards.filter(c => c.columnId === column.id).map(card => `
+                            <div class="kanban-cards" data-column="${column.id}" ondragover="event.preventDefault();" style="min-height: 400px;">
+                                ${(kanbanData.cards || []).filter(c => c && c.columnId === column.id).map(card => `
                                     <div class="kanban-card" draggable="true" data-card-id="${card.id}" style="background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; padding: 16px; margin-bottom: 12px; cursor: ${canEdit ? 'pointer' : 'default'}; transition: all 0.3s ease;" 
                                          onmouseenter="this.style.borderColor='var(--gray-text)'; this.style.transform='translateY(-2px)';" 
                                          onmouseleave="this.style.borderColor='var(--gray-border)'; this.style.transform='translateY(0)';"
@@ -3465,21 +3741,52 @@
                 </div>
             `;
             document.querySelector('.content-card').innerHTML = content;
+            
+            // Aguardar um pouco para garantir que o DOM foi renderizado
+            setTimeout(() => {
             initializeKanbanDragDrop();
+            }, 100);
         }
 
         function loadStaffControl() {
             // Garantir que staffData é um array
             if (!Array.isArray(staffData)) staffData = [];
             
+            // Buscar solicitações pendentes
+            const requestsRaw = getData('txd_registration_requests');
+            const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
+            const pendingRequests = requests.filter(r => r && r.status === 'pending');
+            
+            const canManage = hasPermission('staff.create') || currentUser.role === 'Owner' || currentUser.role === 'CEO' || currentUser.role === 'HeadStaff';
+            
             const content = `
                 <h1 id="sectionTitle">Controle de Staff</h1>
                 <p style="color: var(--gray-light); margin-bottom: 24px;">Gestão de membros da equipe</p>
                 
-                ${hasPermission('staff.create') ? `
-                <div style="margin-bottom: 20px;">
+                ${canManage ? `
+                <div style="margin-bottom: 20px; display: flex; gap: 12px; flex-wrap: wrap;">
                     <button class="btn-modal" onclick="openNewStaff()">
-                        <i class="fas fa-user-plus"></i> Adicionar Membro
+                        <i class="fas fa-user-plus"></i> Cadastrar Manualmente
+                    </button>
+                    ${pendingRequests.length > 0 ? `
+                    <button class="btn-modal btn-warning" onclick="showRegistrationRequests()" style="position: relative;">
+                        <i class="fas fa-user-clock"></i> Solicitações Pendentes
+                        <span style="position: absolute; top: -8px; right: -8px; background: var(--danger); color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600;">
+                            ${pendingRequests.length}
+                        </span>
+                    </button>
+                    ` : ''}
+                </div>
+                ` : ''}
+                
+                ${pendingRequests.length > 0 && canManage ? `
+                <div style="background: var(--warning); color: white; padding: 16px; border-radius: 12px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <strong><i class="fas fa-exclamation-triangle"></i> ${pendingRequests.length} solicitação(ões) pendente(s)</strong>
+                        <p style="margin: 4px 0 0 0; font-size: 13px; opacity: 0.9;">Há solicitações de cadastro aguardando aprovação</p>
+                    </div>
+                    <button class="btn" onclick="showRegistrationRequests()" style="background: white; color: var(--warning); border: none;">
+                        Ver Solicitações
                     </button>
                 </div>
                 ` : ''}
@@ -3523,6 +3830,195 @@
                 </div>
             `;
             document.querySelector('.content-card').innerHTML = content;
+        }
+        
+        // ========== GERENCIAMENTO DE SOLICITAÇÕES DE CADASTRO ==========
+        
+        function showRegistrationRequests() {
+            const requestsRaw = getData('txd_registration_requests');
+            const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
+            const pendingRequests = requests.filter(r => r && r.status === 'pending');
+            
+            if (pendingRequests.length === 0) {
+                alert('Não há solicitações pendentes no momento.');
+                return;
+            }
+            
+            const content = `
+                <div style="margin-bottom: 24px;">
+                    <button class="btn btn-secondary" onclick="loadStaffControl()">
+                        <i class="fas fa-arrow-left"></i> Voltar
+                    </button>
+                </div>
+                
+                <h2 style="color: var(--white-soft); margin-bottom: 24px;">
+                    <i class="fas fa-user-clock"></i> Solicitações de Cadastro Pendentes
+                </h2>
+                
+                <div style="display: grid; gap: 16px;">
+                    ${pendingRequests.map(request => {
+                        const requestDate = new Date(request.requestedAt).toLocaleString('pt-BR');
+                        return `
+                            <div style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border);">
+                                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 16px;">
+                                    <div>
+                                        <h3 style="color: var(--white-soft); font-size: 18px; margin-bottom: 4px;">
+                                            ${request.displayName || request.username}
+                                        </h3>
+                                        <p style="color: var(--gray-light); font-size: 14px;">
+                                            <i class="fas fa-user"></i> ${request.username}
+                                        </p>
+                                        <p style="color: var(--gray-text); font-size: 12px; margin-top: 4px;">
+                                            <i class="fas fa-calendar"></i> Solicitado em ${requestDate}
+                                        </p>
+                                    </div>
+                                    <span style="background: var(--warning); color: white; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">
+                                        Pendente
+                                    </span>
+                                </div>
+                                
+                                <div style="display: flex; gap: 12px; margin-top: 16px;">
+                                    <button class="btn btn-success" onclick="approveRegistration(${request.id})" style="flex: 1;">
+                                        <i class="fas fa-check"></i> Aprovar
+                                    </button>
+                                    <button class="btn btn-danger" onclick="rejectRegistration(${request.id})" style="flex: 1;">
+                                        <i class="fas fa-times"></i> Rejeitar
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+            
+            document.querySelector('.content-card').innerHTML = content;
+        }
+        
+        async function approveRegistration(requestId) {
+            const role = prompt('Digite o cargo para o novo membro:\n\nOpções: Owner, CEO, COO, CMO, CCO, CIO, HeadStaff, Diretor, Coordenador, Admin, Moderador, Suporte, Helper, Dev\n\nOu deixe em branco para usar "Helper" como padrão:');
+            
+            if (role === null) return; // Usuário cancelou
+            
+            const validRoles = ['Owner', 'CEO', 'COO', 'CMO', 'CCO', 'CIO', 'HeadStaff', 'Diretor', 'Coordenador', 'Admin', 'Moderador', 'Suporte', 'Helper', 'Dev'];
+            const selectedRole = role.trim() || 'Helper';
+            
+            if (role.trim() && !validRoles.includes(selectedRole)) {
+                alert('Cargo inválido. Usando "Helper" como padrão.');
+            }
+            
+            try {
+                const requestsRaw = getData('txd_registration_requests');
+                const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
+                const request = requests.find(r => r && r.id === requestId);
+                
+                if (!request) {
+                    alert('Solicitação não encontrada.');
+                    return;
+                }
+                
+                // Atualizar status da solicitação
+                request.status = 'approved';
+                request.approvedBy = currentUser.name || currentUser.displayName;
+                request.approvedAt = new Date().toISOString();
+                request.role = selectedRole;
+                
+                await saveData('txd_registration_requests', requests);
+                
+                // Criar usuário no staff
+                const newStaff = {
+                    id: Date.now(),
+                    name: request.username,
+                    displayName: request.displayName,
+                    role: selectedRole,
+                    email: request.email || null,
+                    status: 'Ativo',
+                    password: request.password, // Em produção, deve ser criptografado
+                    area: request.area || '',
+                    createdAt: new Date().toISOString(),
+                    approvedBy: currentUser.name || currentUser.displayName
+                };
+                
+                const staffData = getData('txd_staff') || [];
+                staffData.push(newStaff);
+                await saveData('txd_staff', staffData);
+                
+                // Notificar Discord
+                sendDiscordNotification('staff', '✅ Cadastro Aprovado', 
+                    `Solicitação de cadastro aprovada`,
+                    [
+                        { name: '👤 Usuário', value: request.username, inline: true },
+                        { name: '📛 Nome', value: request.displayName, inline: true },
+                        { name: '🎖️ Cargo', value: selectedRole, inline: true },
+                        { name: '✅ Aprovado por', value: currentUser.name || currentUser.displayName, inline: false }
+                    ]
+                );
+                
+                // Log da ação
+                logSystemAction('Cadastro aprovado', 'Staff', {
+                    username: request.username,
+                    role: selectedRole,
+                    approvedBy: currentUser.name
+                });
+                
+                alert(`✅ Cadastro aprovado com sucesso!\n\nUsuário: ${request.username}\nCargo: ${selectedRole}\n\nO usuário já pode fazer login no sistema.`);
+                
+                // Recarregar interface
+                loadStaffControl();
+                
+            } catch (error) {
+                console.error('Erro ao aprovar cadastro:', error);
+                alert('Erro ao aprovar cadastro. Tente novamente.');
+            }
+        }
+        
+        async function rejectRegistration(requestId) {
+            const reason = prompt('Digite o motivo da rejeição (opcional):');
+            
+            try {
+                const requestsRaw = getData('txd_registration_requests');
+                const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
+                const request = requests.find(r => r && r.id === requestId);
+                
+                if (!request) {
+                    alert('Solicitação não encontrada.');
+                    return;
+                }
+                
+                // Atualizar status da solicitação
+                request.status = 'rejected';
+                request.approvedBy = currentUser.name || currentUser.displayName;
+                request.approvedAt = new Date().toISOString();
+                request.rejectionReason = reason || 'Não especificado';
+                
+                await saveData('txd_registration_requests', requests);
+                
+                // Notificar Discord
+                sendDiscordNotification('staff', '❌ Cadastro Rejeitado', 
+                    `Solicitação de cadastro rejeitada`,
+                    [
+                        { name: '👤 Usuário', value: request.username, inline: true },
+                        { name: '📛 Nome', value: request.displayName, inline: true },
+                        { name: '❌ Rejeitado por', value: currentUser.name || currentUser.displayName, inline: true },
+                        { name: '📝 Motivo', value: reason || 'Não especificado', inline: false }
+                    ]
+                );
+                
+                // Log da ação
+                logSystemAction('Cadastro rejeitado', 'Staff', {
+                    username: request.username,
+                    reason: reason || 'Não especificado',
+                    rejectedBy: currentUser.name
+                });
+                
+                alert(`❌ Cadastro rejeitado.\n\nUsuário: ${request.username}`);
+                
+                // Recarregar interface
+                loadStaffControl();
+                
+            } catch (error) {
+                console.error('Erro ao rejeitar cadastro:', error);
+                alert('Erro ao rejeitar cadastro. Tente novamente.');
+            }
         }
 
         // ========== SISTEMA DE COMANDOS ==========
@@ -4820,7 +5316,8 @@
 
         // ========== FUNÇÕES DE GRUPOS ==========
         function getGroupChatMessages(groupId) {
-            return chatMessages.filter(msg => msg.groupId === groupId)
+            const messages = Array.isArray(chatMessages) ? chatMessages : [];
+            return messages.filter(msg => msg && msg.groupId === groupId)
                 .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
         }
 
@@ -4832,8 +5329,9 @@
         }
 
         function getGroupUnreadCount(groupId) {
-            return chatMessages.filter(msg => 
-                msg.groupId === groupId && 
+            const messages = Array.isArray(chatMessages) ? chatMessages : [];
+            return messages.filter(msg => 
+                msg && msg.groupId === groupId && 
                 msg.senderId !== currentUser.id && 
                 !msg.read
             ).length;
@@ -5138,7 +5636,8 @@
         }
 
         function getMessagesByStaff(staffId) {
-            return chatMessages.filter(msg => msg.senderId === staffId).length;
+            const messages = Array.isArray(chatMessages) ? chatMessages : [];
+            return messages.filter(msg => msg && msg.senderId === staffId).length;
         }
 
         function getStaffByRole() {
@@ -5160,7 +5659,10 @@
                 title: '📨 Primeira Mensagem',
                 description: 'Envie sua primeira mensagem no chat',
                 icon: '💬',
-                condition: () => chatMessages.filter(m => m.senderId === currentUser.id).length >= 1,
+                condition: () => {
+                    const messages = Array.isArray(chatMessages) ? chatMessages : [];
+                    return messages.filter(m => m && m.senderId === currentUser.id).length >= 1;
+                },
                 reward: '+10 pts'
             },
             {
@@ -5168,7 +5670,10 @@
                 title: '💯 Mestre do Chat',
                 description: 'Envie 100 mensagens no chat',
                 icon: '🗣️',
-                condition: () => chatMessages.filter(m => m.senderId === currentUser.id).length >= 100,
+                condition: () => {
+                    const messages = Array.isArray(chatMessages) ? chatMessages : [];
+                    return messages.filter(m => m && m.senderId === currentUser.id).length >= 100;
+                },
                 reward: '+50 pts'
             },
             {
@@ -5216,7 +5721,10 @@
                 title: '📢 Comunicador',
                 description: 'Envie 10 mensagens em grupos',
                 icon: '📣',
-                condition: () => chatMessages.filter(m => m.senderId === currentUser.id && m.groupId).length >= 10,
+                condition: () => {
+                    const messages = Array.isArray(chatMessages) ? chatMessages : [];
+                    return messages.filter(m => m && m.senderId === currentUser.id && m.groupId).length >= 10;
+                },
                 reward: '+30 pts'
             },
             {
@@ -5224,7 +5732,10 @@
                 title: '📎 Compartilhador',
                 description: 'Envie seu primeiro anexo',
                 icon: '📁',
-                condition: () => chatMessages.filter(m => m.senderId === currentUser.id && m.attachment).length >= 1,
+                condition: () => {
+                    const messages = Array.isArray(chatMessages) ? chatMessages : [];
+                    return messages.filter(m => m && m.senderId === currentUser.id && m.attachment).length >= 1;
+                },
                 reward: '+15 pts'
             },
             {
@@ -5337,13 +5848,15 @@
             let current = 0;
             let target = 1;
             
+            const messages = Array.isArray(chatMessages) ? chatMessages : [];
+            
             switch(achievement.id) {
                 case 'first_message':
-                    current = Math.min(chatMessages.filter(m => m.senderId === currentUser.id).length, 1);
+                    current = Math.min(messages.filter(m => m && m.senderId === currentUser.id).length, 1);
                     target = 1;
                     break;
                 case 'chat_master':
-                    current = chatMessages.filter(m => m.senderId === currentUser.id).length;
+                    current = messages.filter(m => m && m.senderId === currentUser.id).length;
                     target = 100;
                     break;
                 case 'first_task':
@@ -5363,11 +5876,11 @@
                     target = 30;
                     break;
                 case 'group_message':
-                    current = chatMessages.filter(m => m.senderId === currentUser.id && m.groupId).length;
+                    current = messages.filter(m => m && m.senderId === currentUser.id && m.groupId).length;
                     target = 10;
                     break;
                 case 'first_attachment':
-                    current = Math.min(chatMessages.filter(m => m.senderId === currentUser.id && m.attachment).length, 1);
+                    current = Math.min(messages.filter(m => m && m.senderId === currentUser.id && m.attachment).length, 1);
                     target = 1;
                     break;
             }
@@ -5471,12 +5984,10 @@
             
             // Se não existe config salva OU é um array vazio, salvar padrão
             if (!stored || Array.isArray(stored) || Object.keys(stored).length === 0 || !stored.hasOwnProperty('enabled')) {
-                console.log('getDiscordConfig() - Criando config padrão');
+                // Criar config padrão silenciosamente (sem log)
                 saveData('txd_discord_config', defaultConfig);
                 return defaultConfig;
             }
-            
-            console.log('getDiscordConfig() - Config existente:', stored);
             
             // Garantir que todas as propriedades existem
             return {
@@ -5489,6 +6000,11 @@
         }
 
         let discordConfig = getDiscordConfig();
+
+        // ========== PAINEL ADMINISTRATIVO CENTRAL - PASSO 3 ==========
+        
+        // Variável para controlar aba ativa
+        let activeSettingsTab = 'geral';
 
         function loadSettings() {
             console.log('loadSettings() chamado');
@@ -5513,53 +6029,241 @@
                 document.querySelector('.content-card').innerHTML = content;
                 return;
             }
+            
+            // Carregar aba padrão
+            loadSettingsSection(activeSettingsTab);
+        }
+        
+        // Função para carregar seção específica do painel de configurações
+        function loadSettingsSection(tab) {
+            activeSettingsTab = tab;
+            
+            const tabs = [
+                { id: 'geral', name: 'Geral', icon: '⚙️' },
+                { id: 'cargos', name: 'Cargos & Permissões', icon: '👥' },
+                { id: 'seguranca', name: 'Acesso & Segurança', icon: '🔐' },
+                { id: 'discord', name: 'Discord', icon: '🎮' },
+                { id: 'logs', name: 'Logs & Auditoria', icon: '📋' },
+                { id: 'sistema', name: 'Sistema', icon: '🖥️' }
+            ];
+            
+            const tabsHTML = tabs.map(t => `
+                <button class="settings-tab ${tab === t.id ? 'active' : ''}" 
+                        onclick="loadSettingsSection('${t.id}')"
+                        style="padding: 12px 20px; background: ${tab === t.id ? 'var(--gray-medium)' : 'transparent'}; 
+                               border: none; border-bottom: 2px solid ${tab === t.id ? 'var(--success)' : 'transparent'}; 
+                               color: ${tab === t.id ? 'var(--white-soft)' : 'var(--gray-light)'}; 
+                               cursor: pointer; font-size: 14px; font-weight: ${tab === t.id ? '600' : '400'}; 
+                               transition: all 0.3s ease;">
+                    <i class="fas"></i> ${t.icon} ${t.name}
+                </button>
+            `).join('');
+            
+            let contentHTML = '';
+            
+            switch(tab) {
+                case 'geral':
+                    contentHTML = loadSettingsGeneral();
+                    break;
+                case 'cargos':
+                    contentHTML = loadSettingsRoles();
+                    break;
+                case 'seguranca':
+                    contentHTML = loadSettingsSecurity();
+                    break;
+                case 'discord':
+                    contentHTML = loadSettingsDiscord();
+                    break;
+                case 'logs':
+                    contentHTML = loadSettingsLogs();
+                    break;
+                case 'sistema':
+                    contentHTML = loadSettingsSystem();
+                    break;
+                default:
+                    contentHTML = loadSettingsGeneral();
+            }
 
             const content = `
                 <h1 id="sectionTitle">Configurações do Sistema</h1>
-                <p style="color: var(--gray-light); margin-bottom: 24px;">Gerenciamento de permissões e configurações</p>
+                <p style="color: var(--gray-light); margin-bottom: 24px;">Painel Administrativo Central</p>
                 
-                ${hasPermission('permission.view') ? `
-                <div style="margin-bottom: 32px;">
-                    <h2 style="color: var(--white-soft); margin-bottom: 16px; font-size: 18px;">
-                        <i class="fas fa-shield-alt"></i> Sistema de Permissões
+                <!-- Tabs Navigation -->
+                <div style="background: var(--gray-dark); border-radius: 12px; padding: 8px; margin-bottom: 24px; border: 1px solid var(--gray-border); display: flex; gap: 4px; overflow-x: auto;">
+                    ${tabsHTML}
+                </div>
+                
+                <!-- Tab Content -->
+                <div id="settingsTabContent">
+                    ${contentHTML}
+                </div>
+            `;
+            
+            document.querySelector('.content-card').innerHTML = content;
+        }
+        
+        // 1. CONFIGURAÇÕES GERAIS
+        function loadSettingsGeneral() {
+            const systemSettings = getData('txd_system_settings') || {
+                systemName: 'TXD Staff System',
+                maintenanceMode: false,
+                globalMessage: '',
+                logoUrl: ''
+            };
+            
+            return `
+                <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border); margin-bottom: 24px;">
+                    <h2 style="color: var(--white-soft); margin-bottom: 20px; font-size: 18px;">
+                        <i class="fas fa-cog"></i> Configurações Gerais
                     </h2>
-                    <div style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border);">
-                        <p style="color: var(--gray-light); margin-bottom: 16px;">
-                            Visualize as permissões de cada cargo no sistema. Apenas Owner e CEO podem gerenciar permissões.
+                    
+                    <div style="display: grid; gap: 20px;">
+                        <!-- Nome do Sistema -->
+                        <div>
+                            <label style="color: var(--gray-light); font-size: 14px; margin-bottom: 8px; display: block;">
+                                Nome do Sistema
+                            </label>
+                            <input type="text" 
+                                   id="systemName"
+                                   value="${systemSettings.systemName || 'TXD Staff System'}"
+                                   placeholder="Nome do sistema"
+                                   style="width: 100%; padding: 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-size: 14px;"
+                                   onchange="saveSystemSetting('systemName', this.value)">
+                        </div>
+                        
+                        <!-- Logo (placeholder) -->
+                        <div>
+                            <label style="color: var(--gray-light); font-size: 14px; margin-bottom: 8px; display: block;">
+                                URL do Logo
+                            </label>
+                            <input type="text" 
+                                   id="logoUrl"
+                                   value="${systemSettings.logoUrl || ''}"
+                                   placeholder="https://exemplo.com/logo.png"
+                                   style="width: 100%; padding: 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-size: 14px;"
+                                   onchange="saveSystemSetting('logoUrl', this.value)">
+                            <p style="color: var(--gray-text); font-size: 12px; margin-top: 8px;">
+                                Upload de imagem será implementado em breve
+                            </p>
+                        </div>
+                        
+                        <!-- Modo Manutenção -->
+                        <div>
+                            <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
+                                <div class="toggle-switch ${systemSettings.maintenanceMode ? 'active' : ''}" 
+                                     onclick="toggleMaintenanceMode()"
+                                     id="maintenanceToggle">
+                                </div>
+                                <span style="color: var(--gray-light); font-size: 14px;">
+                                    Modo Manutenção
+                                    <span style="margin-left: 8px; font-weight: 600; color: ${systemSettings.maintenanceMode ? 'var(--warning)' : 'var(--success)'};">
+                                        (${systemSettings.maintenanceMode ? 'ATIVO' : 'INATIVO'})
+                                    </span>
+                                </span>
+                            </label>
+                            <p style="color: var(--gray-text); font-size: 12px; margin-top: 8px; margin-left: 48px;">
+                                Quando ativo, apenas administradores podem acessar o sistema
+                            </p>
+                        </div>
+                        
+                        <!-- Mensagem Global -->
+                        <div>
+                            <label style="color: var(--gray-light); font-size: 14px; margin-bottom: 8px; display: block;">
+                                Mensagem Global do Sistema
+                            </label>
+                            <textarea id="globalMessage"
+                                      placeholder="Digite uma mensagem que será exibida para todos os usuários..."
+                                      style="width: 100%; padding: 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-size: 14px; min-height: 100px; resize: vertical; font-family: inherit;"
+                                      onchange="saveSystemSetting('globalMessage', this.value)">${systemSettings.globalMessage || ''}</textarea>
+                            <p style="color: var(--gray-text); font-size: 12px; margin-top: 8px;">
+                                Esta mensagem aparecerá no topo do dashboard para todos os usuários
+                            </p>
+                        </div>
+                        
+                        <button class="btn btn-primary" onclick="saveAllGeneralSettings()" style="margin-top: 8px;">
+                            <i class="fas fa-save"></i> Salvar Configurações Gerais
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // 2. CARGOS & PERMISSÕES (RBAC COMPLETO)
+        function loadSettingsRoles() {
+            if (!hasPermission('permission.manage') && currentUser.role !== 'Owner' && currentUser.role !== 'CEO') {
+                return `
+                    <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border); text-align: center;">
+                        <i class="fas fa-lock" style="font-size: 48px; color: var(--danger); margin-bottom: 16px;"></i>
+                        <p style="color: var(--danger); font-size: 16px; margin-bottom: 8px;">Acesso Negado</p>
+                        <p style="color: var(--gray-light); font-size: 14px;">
+                            Apenas Owner e CEO podem gerenciar cargos e permissões.
                         </p>
+                    </div>
+                `;
+            }
+            
+            const roles = Object.keys(ROLE_PERMISSIONS);
+            
+            return `
+                <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border); margin-bottom: 24px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                        <h2 style="color: var(--white-soft); font-size: 18px; margin: 0;">
+                            <i class="fas fa-users-cog"></i> Gestão de Cargos e Permissões
+                        </h2>
+                        <button class="btn btn-primary" onclick="openNewRoleModal()">
+                            <i class="fas fa-plus"></i> Novo Cargo
+                        </button>
+                    </div>
+                    
                         <div style="display: grid; gap: 16px;">
-                            ${Object.keys(ROLE_PERMISSIONS).map(role => {
-                                const roleData = ROLE_PERMISSIONS[role];
-                                const permissions = roleData.permissions;
-                                const hasAll = permissions.includes('all');
+                        ${roles.map(role => {
+                            const permissions = getUserPermissions(role);
+                            const hasAll = permissions.includes('*');
+                            const isCLevel = ['Owner', 'CEO', 'COO', 'CMO', 'CCO', 'CIO'].includes(role);
+                            const isOperational = !isCLevel && role !== 'Dev';
                                 
                                 return `
                                     <div style="background: var(--black-dark); border-radius: 8px; padding: 16px; border: 1px solid var(--gray-border);">
                                         <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 12px;">
-                                            <div>
-                                                <h3 style="color: var(--white-soft); font-size: 16px; font-weight: 600; margin-bottom: 4px;">
+                                        <div style="flex: 1;">
+                                            <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
+                                                <h3 style="color: var(--white-soft); font-size: 16px; font-weight: 600; margin: 0;">
                                                     ${role}
                                                 </h3>
-                                                <p style="color: var(--gray-text); font-size: 12px;">${roleData.description}</p>
-                                            </div>
-                                            <span style="background: ${hasAll ? 'var(--success)' : 'var(--gray-medium)'}; color: white; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 600;">
-                                                ${hasAll ? 'Acesso Total' : `${permissions.length} permissões`}
+                                                <span style="background: ${isCLevel ? 'var(--success)' : 'var(--info)'}; color: white; padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;">
+                                                    ${isCLevel ? 'C-Level' : isOperational ? 'Operacional' : 'Técnico'}
                                             </span>
                                         </div>
+                                            <p style="color: var(--gray-text); font-size: 12px; margin: 0;">
+                                                ${hasAll ? 'Acesso total ao sistema' : `${permissions.length} permissões configuradas`}
+                                            </p>
+                                        </div>
+                                        <div style="display: flex; gap: 8px;">
+                                            <button class="btn btn-secondary" onclick="editRole('${role}')" style="padding: 8px 16px; font-size: 12px;">
+                                                <i class="fas fa-edit"></i> Editar
+                                            </button>
+                                            ${role !== 'Owner' && role !== 'CEO' ? `
+                                            <button class="btn btn-danger" onclick="deleteRole('${role}')" style="padding: 8px 16px; font-size: 12px;">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                            ` : ''}
+                                        </div>
+                                    </div>
+                                    
                                         ${hasAll ? `
-                                        <p style="color: var(--success); font-size: 12px; padding: 8px; background: rgba(0, 255, 136, 0.1); border-radius: 6px;">
+                                    <p style="color: var(--success); font-size: 12px; padding: 8px; background: rgba(0, 255, 136, 0.1); border-radius: 6px; margin: 0;">
                                             <i class="fas fa-check-circle"></i> Possui acesso total ao sistema
                                         </p>
                                         ` : `
-                                        <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;">
-                                            ${permissions.slice(0, 10).map(perm => `
+                                    <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px;">
+                                        ${permissions.slice(0, 8).map(perm => `
                                                 <span style="background: var(--gray-medium); color: var(--gray-light); padding: 4px 8px; border-radius: 4px; font-size: 11px;">
-                                                    ${ALL_PERMISSIONS[perm] || perm}
+                                                ${perm}
                                                 </span>
                                             `).join('')}
-                                            ${permissions.length > 10 ? `
+                                        ${permissions.length > 8 ? `
                                                 <span style="background: var(--gray-medium); color: var(--gray-light); padding: 4px 8px; border-radius: 4px; font-size: 11px;">
-                                                    +${permissions.length - 10} mais
+                                                +${permissions.length - 8} mais
                                                 </span>
                                             ` : ''}
                                         </div>
@@ -5569,77 +6273,181 @@
                             }).join('')}
                         </div>
                     </div>
-                </div>
-                ` : ''}
                 
-                <div style="margin-bottom: 32px;">
+                <!-- Preview de Permissões -->
+                <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border);">
                     <h2 style="color: var(--white-soft); margin-bottom: 16px; font-size: 18px;">
-                        <i class="fas fa-user-shield"></i> Suas Permissões Atuais
+                        <i class="fas fa-eye"></i> Preview: Suas Permissões
                     </h2>
-                    <div style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border);">
-                        <div style="margin-bottom: 16px;">
-                            <p style="color: var(--white-soft); font-weight: 600; margin-bottom: 4px;">Cargo: ${currentUser.role}</p>
-                            <p style="color: var(--gray-light); font-size: 14px;">${getRoleDescription(currentUser.role)}</p>
-                        </div>
-                        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px;">
+                    <div style="background: var(--black-dark); border-radius: 8px; padding: 16px;">
+                        <p style="color: var(--white-soft); font-weight: 600; margin-bottom: 8px;">Cargo: ${currentUser.role}</p>
+                        <p style="color: var(--gray-light); font-size: 14px; margin-bottom: 16px;">
+                            ${getUserPermissions(currentUser.role).includes('*') ? 'Acesso total ao sistema' : `${getUserPermissions(currentUser.role).length} permissões ativas`}
+                        </p>
+                        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
                             ${getCurrentUserPermissions().map(perm => `
-                                <div style="background: var(--black-dark); padding: 10px; border-radius: 6px; border-left: 3px solid var(--success);">
-                                    <p style="color: var(--white-soft); font-size: 13px; margin: 0;">
-                                        <i class="fas fa-check-circle" style="color: var(--success); margin-right: 6px;"></i>
-                                        ${ALL_PERMISSIONS[perm] || perm}
-                                    </p>
-                                </div>
+                                <span style="background: var(--success); color: white; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 500;">
+                                    <i class="fas fa-check-circle"></i> ${perm}
+                                </span>
                             `).join('')}
                         </div>
                     </div>
                 </div>
-                
-                ${hasPermission('system.sync') ? `
-                <div style="margin-bottom: 32px;">
-                    <h2 style="color: var(--white-soft); margin-bottom: 16px; font-size: 18px;">
-                        <i class="fas fa-cog"></i> Ações do Sistema
+            `;
+        }
+        
+        // 3. ACESSO & SEGURANÇA
+        function loadSettingsSecurity() {
+            const securitySettings = getData('txd_security_settings') || {
+                sessionTimeout: 30, // minutos
+                autoLogout: true,
+                maxLoginAttempts: 5,
+                requireTermsAcceptance: true,
+                blockedIPs: []
+            };
+            
+            return `
+                <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border); margin-bottom: 24px;">
+                    <h2 style="color: var(--white-soft); margin-bottom: 20px; font-size: 18px;">
+                        <i class="fas fa-shield-alt"></i> Configurações de Segurança
                     </h2>
-                    <div style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border);">
-                        <div style="display: flex; flex-wrap: wrap; gap: 12px;">
-                            <button class="btn-modal" onclick="syncSystem()">
-                                <i class="fas fa-sync"></i> Sincronizar Sistema
-                            </button>
-                            ${hasPermission('system.backup') ? `
-                            <button class="btn-modal" onclick="alert('Funcionalidade de backup será implementada em breve.')">
-                                <i class="fas fa-database"></i> Fazer Backup
-                            </button>
-                            ` : ''}
-                            ${hasPermission('system.logs') ? `
-                            <button class="btn-modal" onclick="alert('Visualização de logs será implementada em breve.')">
-                                <i class="fas fa-file-alt"></i> Ver Logs
-                            </button>
-                            ` : ''}
+                    
+                    <div style="display: grid; gap: 20px;">
+                        <!-- Tempo de Sessão -->
+                        <div>
+                            <label style="color: var(--gray-light); font-size: 14px; margin-bottom: 8px; display: block;">
+                                Tempo de Sessão (minutos)
+                            </label>
+                            <input type="number" 
+                                   id="sessionTimeout"
+                                   value="${securitySettings.sessionTimeout || 30}"
+                                   min="5"
+                                   max="480"
+                                   style="width: 100%; padding: 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-size: 14px;"
+                                   onchange="saveSystemSetting('sessionTimeout', parseInt(this.value))">
+                            <p style="color: var(--gray-text); font-size: 12px; margin-top: 8px;">
+                                Tempo máximo de inatividade antes do logout automático
+                            </p>
                         </div>
+                        
+                        <!-- Logout Automático -->
+                        <div>
+                            <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
+                                <div class="toggle-switch ${securitySettings.autoLogout ? 'active' : ''}" 
+                                     onclick="toggleAutoLogout()"
+                                     id="autoLogoutToggle">
+                                </div>
+                                <span style="color: var(--gray-light); font-size: 14px;">
+                                    Logout Automático por Inatividade
+                                    <span style="margin-left: 8px; font-weight: 600; color: ${securitySettings.autoLogout ? 'var(--success)' : 'var(--danger)'};">
+                                        (${securitySettings.autoLogout ? 'ATIVO' : 'INATIVO'})
+                                    </span>
+                                </span>
+                            </label>
+                        </div>
+                        
+                        <!-- Tentativas de Login -->
+                        <div>
+                            <label style="color: var(--gray-light); font-size: 14px; margin-bottom: 8px; display: block;">
+                                Máximo de Tentativas de Login
+                            </label>
+                            <input type="number" 
+                                   id="maxLoginAttempts"
+                                   value="${securitySettings.maxLoginAttempts || 5}"
+                                   min="3"
+                                   max="10"
+                                   style="width: 100%; padding: 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-size: 14px;"
+                                   onchange="saveSystemSetting('maxLoginAttempts', parseInt(this.value))">
+                            <p style="color: var(--gray-text); font-size: 12px; margin-top: 8px;">
+                                Após exceder este limite, o IP será bloqueado temporariamente
+                            </p>
+                        </div>
+                        
+                        <!-- Aceite de Termos -->
+                        <div>
+                            <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
+                                <div class="toggle-switch ${securitySettings.requireTermsAcceptance ? 'active' : ''}" 
+                                     onclick="toggleTermsRequirement()"
+                                     id="termsToggle">
+                                </div>
+                                <span style="color: var(--gray-light); font-size: 14px;">
+                                    Forçar Aceite de Termos
+                                    <span style="margin-left: 8px; font-weight: 600; color: ${securitySettings.requireTermsAcceptance ? 'var(--success)' : 'var(--danger)'};">
+                                        (${securitySettings.requireTermsAcceptance ? 'ATIVO' : 'INATIVO'})
+                                    </span>
+                                </span>
+                            </label>
+                            <p style="color: var(--gray-text); font-size: 12px; margin-top: 8px; margin-left: 48px;">
+                                Usuários devem aceitar os termos antes de acessar o sistema
+                            </p>
+                        </div>
+                        
+                        <!-- IPs Bloqueados (preparar estrutura) -->
+                        <div>
+                            <label style="color: var(--gray-light); font-size: 14px; margin-bottom: 8px; display: block;">
+                                IPs Bloqueados
+                            </label>
+                            <div style="background: var(--black-dark); border-radius: 8px; padding: 12px; border: 1px solid var(--gray-border); min-height: 100px;">
+                                ${securitySettings.blockedIPs && securitySettings.blockedIPs.length > 0 ? `
+                                    ${securitySettings.blockedIPs.map(ip => `
+                                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; background: var(--gray-dark); border-radius: 6px; margin-bottom: 8px;">
+                                            <span style="color: var(--white-soft); font-family: monospace; font-size: 12px;">${ip}</span>
+                                            <button class="btn btn-danger" onclick="unblockIP('${ip}')" style="padding: 4px 12px; font-size: 11px;">
+                                                <i class="fas fa-unlock"></i> Desbloquear
+                            </button>
+                        </div>
+                                    `).join('')}
+                                ` : `
+                                    <p style="color: var(--gray-text); font-size: 12px; text-align: center; margin: 0;">
+                                        Nenhum IP bloqueado no momento
+                                    </p>
+                                `}
+                    </div>
+                            <p style="color: var(--gray-text); font-size: 12px; margin-top: 8px;">
+                                IPs bloqueados automaticamente após múltiplas tentativas de login falhadas
+                            </p>
+                </div>
+                        
+                        <button class="btn btn-primary" onclick="saveAllSecuritySettings()" style="margin-top: 8px;">
+                            <i class="fas fa-save"></i> Salvar Configurações de Segurança
+                        </button>
                     </div>
                 </div>
-                ` : ''}
-                
-                <!-- Integração Discord -->
-                <div class="discord-section">
-                    <div class="discord-header">
-                        <div class="discord-icon">
+            `;
+        }
+        
+        // 4. DISCORD (já existe, mas vamos adaptar para a aba)
+        function loadSettingsDiscord() {
+            discordConfig = getDiscordConfig();
+            
+            return `
+                <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border);">
+                    <div class="discord-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+                        <div style="display: flex; align-items: center; gap: 16px;">
+                            <div class="discord-icon" style="width: 48px; height: 48px; background: #5865F2; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 24px;">
                             <i class="fab fa-discord"></i>
                         </div>
-                        <div class="discord-title">
-                            <h3>🎮 Integração com Discord</h3>
-                            <p>Envie notificações automáticas para o servidor Discord</p>
+                            <div>
+                                <h2 style="color: var(--white-soft); font-size: 18px; margin: 0;">
+                                    Integração com Discord
+                                </h2>
+                                <p style="color: var(--gray-light); font-size: 14px; margin: 4px 0 0 0;">
+                                    Envie notificações automáticas para o servidor Discord
+                                </p>
                         </div>
-                        <div class="discord-status ${discordConfig.enabled ? 'active' : 'inactive'}" id="discordStatusBadge">
-                            <i class="fas fa-circle"></i>
+                        </div>
+                        <div class="discord-status ${discordConfig.enabled ? 'active' : 'inactive'}" 
+                             style="background: ${discordConfig.enabled ? 'var(--success)' : 'var(--danger)'}; 
+                                    color: white; padding: 8px 16px; border-radius: 20px; font-size: 12px; font-weight: 600;">
+                            <i class="fas fa-circle" style="font-size: 8px; margin-right: 6px;"></i>
                             ${discordConfig.enabled ? 'Ativo' : 'Inativo'}
                         </div>
                     </div>
                     
+                    ${discordConfig.enabled ? `
                     <div style="margin-bottom: 20px;">
                         <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;" onclick="toggleDiscordIntegration()">
-                            <div class="toggle-switch ${discordConfig.enabled ? 'active' : ''}" 
-                                 id="discordToggle">
-                            </div>
+                                <div class="toggle-switch ${discordConfig.enabled ? 'active' : ''}" id="discordToggle"></div>
                             <span style="color: var(--gray-light); font-size: 14px;">
                                 Ativar integração com Discord
                                 <span style="margin-left: 8px; font-weight: 600; color: ${discordConfig.enabled ? 'var(--success)' : 'var(--danger)'};">
@@ -5649,292 +6457,459 @@
                         </label>
                     </div>
                     
-                    ${discordConfig.enabled ? `
-                    <!-- Webhooks -->
-                    <h4 style="color: var(--white-soft); margin: 24px 0 16px; font-size: 16px;">
-                        <i class="fas fa-link"></i> Webhooks do Discord
-                    </h4>
-                    
-                    <div class="webhook-item">
-                        <div class="webhook-header">
-                            <div class="webhook-name">
-                                <i class="fas fa-bell"></i>
-                                Webhook Principal
-                            </div>
-                        </div>
+                        <!-- Webhook Principal -->
+                        <div style="margin-bottom: 20px;">
+                            <label style="color: var(--gray-light); font-size: 14px; margin-bottom: 8px; display: block;">
+                                <i class="fas fa-link"></i> Webhook Principal (Obrigatório)
+                            </label>
                         <input type="text" 
                                id="webhookMain"
                                placeholder="https://discord.com/api/webhooks/..."
-                               value="${discordConfig.webhooks.main}"
-                               class="webhook-url"
-                               style="width: 100%; padding: 10px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-family: monospace; font-size: 12px;"
+                                   value="${discordConfig.webhooks?.main || ''}"
+                                   style="width: 100%; padding: 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-family: monospace; font-size: 12px;"
                                onchange="saveWebhook('main', this.value)">
-                        <div class="webhook-actions">
-                            <button class="webhook-btn test" onclick="testWebhook('main')">
+                            <div style="display: flex; gap: 8px; margin-top: 8px;">
+                                <button class="btn btn-secondary" onclick="testWebhook('main')" style="padding: 8px 16px; font-size: 12px;">
                                 <i class="fas fa-vial"></i> Testar
                             </button>
-                            <button class="webhook-btn" onclick="saveDiscordConfig()">
-                                <i class="fas fa-save"></i> Salvar
+                                <button class="btn btn-secondary" onclick="diagnoseDiscordIntegration()" style="padding: 8px 16px; font-size: 12px;">
+                                    <i class="fas fa-stethoscope"></i> Diagnóstico
                             </button>
                         </div>
-                    </div>
-                    
-                    <div class="webhook-item">
-                        <div class="webhook-header">
-                            <div class="webhook-name">
-                                <i class="fas fa-file-alt"></i>
-                                Webhook de Logs
-                            </div>
-                        </div>
-                        <input type="text" 
-                               id="webhookLogs"
-                               placeholder="https://discord.com/api/webhooks/..."
-                               value="${discordConfig.webhooks.logs}"
-                               class="webhook-url"
-                               style="width: 100%; padding: 10px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-family: monospace; font-size: 12px;"
-                               onchange="saveWebhook('logs', this.value)">
-                        <div class="webhook-actions">
-                            <button class="webhook-btn test" onclick="testWebhook('logs')">
-                                <i class="fas fa-vial"></i> Testar
-                            </button>
-                            <button class="webhook-btn" onclick="saveDiscordConfig()">
-                                <i class="fas fa-save"></i> Salvar
-                            </button>
-                        </div>
-                    </div>
-                    
-                    <div class="webhook-item">
-                        <div class="webhook-header">
-                            <div class="webhook-name">
-                                <i class="fas fa-calendar"></i>
-                                Webhook de Eventos
-                            </div>
-                        </div>
-                        <input type="text" 
-                               id="webhookEvents"
-                               placeholder="https://discord.com/api/webhooks/..."
-                               value="${discordConfig.webhooks.events}"
-                               class="webhook-url"
-                               style="width: 100%; padding: 10px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-family: monospace; font-size: 12px;"
-                               onchange="saveWebhook('events', this.value)">
-                        <div class="webhook-actions">
-                            <button class="webhook-btn test" onclick="testWebhook('events')">
-                                <i class="fas fa-vial"></i> Testar
-                            </button>
-                            <button class="webhook-btn" onclick="saveDiscordConfig()">
-                                <i class="fas fa-save"></i> Salvar
-                            </button>
-                        </div>
-                    </div>
-                    
-                    <div class="webhook-item">
-                        <div class="webhook-header">
-                            <div class="webhook-name">
-                                <i class="fas fa-ticket-alt"></i>
-                                Webhook de Tickets
-                            </div>
-                        </div>
-                        <input type="text" 
-                               id="webhookTickets"
-                               placeholder="https://discord.com/api/webhooks/..."
-                               value="${discordConfig.webhooks.tickets}"
-                               class="webhook-url"
-                               style="width: 100%; padding: 10px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-family: monospace; font-size: 12px;"
-                               onchange="saveWebhook('tickets', this.value)">
-                        <div class="webhook-actions">
-                            <button class="webhook-btn test" onclick="testWebhook('tickets')">
-                                <i class="fas fa-vial"></i> Testar
-                            </button>
-                            <button class="webhook-btn" onclick="saveDiscordConfig()">
-                                <i class="fas fa-save"></i> Salvar
-                            </button>
-                        </div>
-                    </div>
-                    
-                    <!-- Tipos de Notificações -->
-                    <h4 style="color: var(--white-soft); margin: 24px 0 16px; font-size: 16px;">
-                        <i class="fas fa-bell"></i> Tipos de Notificações
-                    </h4>
-                    
-                    <div class="notification-types">
-                        <div class="notification-type">
-                            <div class="notification-type-label">
-                                <i class="fas fa-comments"></i>
-                                <span>Chat</span>
-                            </div>
-                            <div class="toggle-switch ${discordConfig.notifications.chat ? 'active' : ''}"
-                                 onclick="toggleNotification('chat')">
-                            </div>
-                        </div>
-                        
-                        <div class="notification-type">
-                            <div class="notification-type-label">
-                                <i class="fas fa-tasks"></i>
-                                <span>Tarefas</span>
-                            </div>
-                            <div class="toggle-switch ${discordConfig.notifications.tasks ? 'active' : ''}"
-                                 onclick="toggleNotification('tasks')">
-                            </div>
-                        </div>
-                        
-                        <div class="notification-type">
-                            <div class="notification-type-label">
-                                <i class="fas fa-ticket-alt"></i>
-                                <span>Tickets</span>
-                            </div>
-                            <div class="toggle-switch ${discordConfig.notifications.tickets ? 'active' : ''}"
-                                 onclick="toggleNotification('tickets')">
-                            </div>
-                        </div>
-                        
-                        <div class="notification-type">
-                            <div class="notification-type-label">
-                                <i class="fas fa-calendar"></i>
-                                <span>Eventos</span>
-                            </div>
-                            <div class="toggle-switch ${discordConfig.notifications.events ? 'active' : ''}"
-                                 onclick="toggleNotification('events')">
-                            </div>
-                        </div>
-                        
-                        <div class="notification-type">
-                            <div class="notification-type-label">
-                                <i class="fas fa-trophy"></i>
-                                <span>Conquistas</span>
-                            </div>
-                            <div class="toggle-switch ${discordConfig.notifications.achievements ? 'active' : ''}"
-                                 onclick="toggleNotification('achievements')">
-                            </div>
-                        </div>
-                        
-                        <div class="notification-type">
-                            <div class="notification-type-label">
-                                <i class="fas fa-users"></i>
-                                <span>Staff</span>
-                            </div>
-                            <div class="toggle-switch ${discordConfig.notifications.staff ? 'active' : ''}"
-                                 onclick="toggleNotification('staff')">
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Preview -->
-                    <h4 style="color: var(--white-soft); margin: 24px 0 16px; font-size: 16px;">
-                        <i class="fas fa-eye"></i> Preview de Notificação
-                    </h4>
-                    
-                    <div class="discord-preview">
-                        <div class="discord-preview-header">
-                            <div class="discord-preview-avatar">TXD</div>
-                            <div>
-                                <div class="discord-preview-name">TXD Staff Bot</div>
-                                <div style="font-size: 11px; color: #72767d;">Hoje às ${new Date().toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'})}</div>
-                            </div>
-                        </div>
-                        <div class="discord-preview-content">
-                            <strong>🎯 Nova Tarefa Criada</strong><br>
-                            <strong>Título:</strong> Revisar sistema de permissões<br>
-                            <strong>Responsável:</strong> ${currentUser.displayName}<br>
-                            <strong>Prioridade:</strong> Alta<br>
-                            <strong>Data:</strong> ${new Date().toLocaleDateString('pt-BR')}
-                        </div>
-                    </div>
-                    
-                    <!-- Comandos do Discord para o Sistema -->
-                    <h4 style="color: var(--white-soft); margin: 24px 0 16px; font-size: 16px;">
-                        <i class="fas fa-arrow-left"></i> Comandos do Discord → Sistema
-                    </h4>
-                    
-                    <div style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border); margin-bottom: 20px;">
-                        <p style="color: var(--gray-light); margin-bottom: 16px; font-size: 14px;">
-                            Configure comandos do Discord que atualizam o sistema automaticamente.
-                        </p>
-                        
-                        <div style="margin-bottom: 20px;">
-                            <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;" onclick="toggleDiscordCommands()">
-                                <div class="toggle-switch ${discordConfig.commandsEnabled ? 'active' : ''}" 
-                                     id="discordCommandsToggle">
-                                </div>
-                                <span style="color: var(--gray-light); font-size: 14px;">
-                                    Ativar comandos do Discord
-                                    <span style="margin-left: 8px; font-weight: 600; color: ${discordConfig.commandsEnabled ? 'var(--success)' : 'var(--danger)'};">
-                                        (${discordConfig.commandsEnabled ? 'ATIVO' : 'INATIVO'})
-                                    </span>
-                                </span>
-                            </label>
-                        </div>
-                        
-                        ${discordConfig.commandsEnabled ? `
-                        <div style="background: var(--black-dark); border-radius: 8px; padding: 16px; margin-bottom: 16px;">
-                            <h5 style="color: var(--white-soft); margin-bottom: 12px; font-size: 14px;">
-                                <i class="fas fa-terminal"></i> Comandos Disponíveis
-                            </h5>
-                            <div style="display: grid; gap: 8px; font-family: monospace; font-size: 12px;">
-                                <div style="color: var(--gray-light);">
-                                    <code style="color: var(--success);">!tarefa</code> criar "Título" | descrição | prioridade | responsável
-                                </div>
-                                <div style="color: var(--gray-light);">
-                                    <code style="color: var(--success);">!evento</code> criar "Título" | data | hora | local
-                                </div>
-                                <div style="color: var(--gray-light);">
-                                    <code style="color: var(--success);">!staff</code> adicionar "Nome" | cargo | área
-                                </div>
-                                <div style="color: var(--gray-light);">
-                                    <code style="color: var(--success);">!ticket</code> criar "Assunto" | descrição | prioridade
-                                </div>
-                                <div style="color: var(--gray-light);">
-                                    <code style="color: var(--success);">!status</code> tarefa ID | nova-coluna
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div style="background: var(--black-dark); border-radius: 8px; padding: 16px; margin-bottom: 16px;">
-                            <h5 style="color: var(--white-soft); margin-bottom: 12px; font-size: 14px;">
-                                <i class="fas fa-code"></i> URL de Recebimento (Webhook Reverso)
-                            </h5>
-                            <input type="text" 
-                                   id="discordCommandsWebhook"
-                                   placeholder="Cole aqui a URL do webhook que receberá comandos"
-                                   value="${discordConfig.commandsWebhook || ''}"
-                                   style="width: 100%; padding: 10px; background: var(--gray-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-family: monospace; font-size: 12px; margin-bottom: 12px;"
-                                   onchange="saveDiscordCommandsWebhook(this.value)">
-                            <p style="color: var(--gray-text); font-size: 11px; margin-bottom: 12px;">
-                                Configure um webhook reverso ou use um bot do Discord para enviar comandos.
+                            <p style="color: var(--gray-text); font-size: 11px; margin-top: 8px;">
+                                Este webhook receberá a maioria das notificações do sistema
                             </p>
-                            <button class="webhook-btn test" onclick="testDiscordCommand()" style="margin-right: 8px;">
-                                <i class="fas fa-vial"></i> Testar Comando
+                    </div>
+                    
+                        <!-- Tipos de Notificações -->
+                        <div style="margin-bottom: 20px;">
+                            <h3 style="color: var(--white-soft); font-size: 16px; margin-bottom: 12px;">
+                                <i class="fas fa-bell"></i> Tipos de Notificações
+                            </h3>
+                            <div style="display: grid; gap: 12px;">
+                                ${['chat', 'tasks', 'tickets', 'events', 'achievements', 'staff'].map(type => {
+                                    const typeNames = {
+                                        chat: '💬 Chat',
+                                        tasks: '📋 Tarefas',
+                                        tickets: '🎫 Tickets',
+                                        events: '📅 Eventos',
+                                        achievements: '🏆 Conquistas',
+                                        staff: '👥 Staff'
+                                    };
+                                    return `
+                                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px; background: var(--black-dark); border-radius: 8px; border: 1px solid var(--gray-border);">
+                                            <span style="color: var(--white-soft); font-size: 14px;">${typeNames[type]}</span>
+                                            <div class="toggle-switch ${discordConfig.notifications?.[type] ? 'active' : ''}" 
+                                                 onclick="toggleNotification('${type}')"
+                                                 style="cursor: pointer;">
+                            </div>
+                        </div>
+                                    `;
+                                }).join('')}
+                        </div>
+                    </div>
+                    
+                        <div style="background: var(--info); color: white; padding: 12px; border-radius: 8px; font-size: 13px; margin-top: 20px;">
+                            <i class="fas fa-info-circle"></i> <strong>Dica:</strong> Use o botão "Diagnóstico" para verificar se tudo está configurado corretamente.
+                            </div>
+                    ` : `
+                        <div style="text-align: center; padding: 40px; color: var(--gray-text);">
+                            <i class="fab fa-discord" style="font-size: 64px; opacity: 0.3; margin-bottom: 16px;"></i>
+                            <p style="margin-bottom: 20px;">Ative a integração para configurar webhooks e notificações</p>
+                            <button class="btn btn-primary" onclick="toggleDiscordIntegration()">
+                                <i class="fas fa-power-off"></i> Ativar Integração
                             </button>
-                            <button class="webhook-btn" onclick="showDiscordCommandsHelp()">
-                                <i class="fas fa-question-circle"></i> Como Configurar
+                        </div>
+                    `}
+                    </div>
+            `;
+        }
+        
+        function loadDiscordConfigContent() {
+            return `
+                <div style="margin-bottom: 20px;">
+                    <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;" onclick="toggleDiscordIntegration()">
+                        <div class="toggle-switch ${discordConfig.enabled ? 'active' : ''}" id="discordToggle"></div>
+                        <span style="color: var(--gray-light); font-size: 14px;">
+                            Ativar integração com Discord
+                            <span style="margin-left: 8px; font-weight: 600; color: ${discordConfig.enabled ? 'var(--success)' : 'var(--danger)'};">
+                                (${discordConfig.enabled ? 'ATIVO' : 'INATIVO'})
+                            </span>
+                        </span>
+                    </label>
+                            </div>
+                
+                <!-- Webhooks e Notificações - conteúdo existente será mantido -->
+                <div style="margin-top: 24px;">
+                    <p style="color: var(--gray-light); font-size: 14px; margin-bottom: 16px;">
+                        Configure os webhooks e tipos de notificações abaixo. O conteúdo completo será carregado aqui.
+                    </p>
+                    <button class="btn btn-secondary" onclick="loadSettingsSection('discord'); location.reload();">
+                        <i class="fas fa-sync"></i> Recarregar Configurações Discord
                             </button>
+                        </div>
+            `;
+        }
+        
+        // 5. LOGS & AUDITORIA
+        function loadSettingsLogs() {
+            if (!hasPermission('system.logs') && currentUser.role !== 'Owner' && currentUser.role !== 'CEO' && currentUser.role !== 'HeadStaff') {
+                return `
+                    <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border); text-align: center;">
+                        <i class="fas fa-lock" style="font-size: 48px; color: var(--danger); margin-bottom: 16px;"></i>
+                        <p style="color: var(--danger); font-size: 16px; margin-bottom: 8px;">Acesso Negado</p>
+                        <p style="color: var(--gray-light); font-size: 14px;">
+                            Apenas C-Level e HeadStaff podem visualizar logs do sistema.
+                        </p>
+                    </div>
+                `;
+            }
+            
+            const logsRaw = getData('txd_system_logs');
+            // Garantir que logs seja sempre um array
+            const logs = Array.isArray(logsRaw) ? logsRaw : [];
+            const recentLogs = logs.slice(-50).reverse(); // Últimos 50 logs
+            
+            return `
+                <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border); margin-bottom: 24px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                        <h2 style="color: var(--white-soft); font-size: 18px; margin: 0;">
+                            <i class="fas fa-file-alt"></i> Logs do Sistema
+                        </h2>
+                        <button class="btn btn-secondary" onclick="exportLogs()">
+                            <i class="fas fa-download"></i> Exportar Logs
+                        </button>
                         </div>
                         
-                        <div style="background: var(--black-dark); border-radius: 8px; padding: 16px;">
-                            <h5 style="color: var(--white-soft); margin-bottom: 12px; font-size: 14px;">
-                                <i class="fas fa-history"></i> Comandos Recebidos
-                            </h5>
-                            <div id="discordCommandsLog" style="max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 11px; color: var(--gray-light);">
-                                ${loadDiscordCommandsLog()}
+                    <div style="background: var(--black-dark); border-radius: 8px; padding: 16px; max-height: 600px; overflow-y: auto;">
+                        ${recentLogs.length > 0 ? `
+                            <div style="display: grid; gap: 12px;">
+                                ${recentLogs.map(log => `
+                                    <div style="background: var(--gray-dark); border-radius: 6px; padding: 12px; border-left: 3px solid ${getLogColor(log.action)};">
+                                        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                                            <div>
+                                                <span style="color: var(--white-soft); font-weight: 600; font-size: 14px;">
+                                                    ${log.action || 'Ação desconhecida'}
+                                                </span>
+                                                <span style="color: var(--gray-text); font-size: 12px; margin-left: 12px;">
+                                                    ${log.module || 'Sistema'}
+                                                </span>
                             </div>
-                            <button class="webhook-btn" onclick="clearDiscordCommandsLog()" style="margin-top: 12px;">
-                                <i class="fas fa-trash"></i> Limpar Log
-                            </button>
+                                            <span style="color: var(--gray-text); font-size: 11px;">
+                                                ${new Date(log.timestamp).toLocaleString('pt-BR')}
+                                            </span>
+                            </div>
+                                        ${log.metadata ? `
+                                            <div style="color: var(--gray-light); font-size: 12px; margin-top: 8px;">
+                                                ${JSON.stringify(log.metadata, null, 2)}
                         </div>
-                        ` : ''}
-                    </div>
-                    ` : `
-                    <div style="text-align: center; padding: 40px; color: var(--gray-text);">
-                        <i class="fab fa-discord" style="font-size: 64px; opacity: 0.3; margin-bottom: 16px;"></i>
-                        <p>Ative a integração para configurar webhooks e notificações</p>
-                    </div>
-                    `}
-                </div>
+                                        ` : ''}
+                                        <div style="color: var(--gray-text); font-size: 11px; margin-top: 8px;">
+                                            Usuário: ${log.user_id || 'Sistema'} | IP: ${log.ip || 'N/A'}
+                            </div>
+                            </div>
+                                `).join('')}
+                        </div>
+                        ` : `
+                            <p style="color: var(--gray-text); font-size: 14px; text-align: center; padding: 40px;">
+                                Nenhum log registrado ainda
+                            </p>
+                        `}
+                            </div>
+                            </div>
             `;
-            document.querySelector('.content-card').innerHTML = content;
+        }
+        
+        function getLogColor(action) {
+            if (action.includes('login') || action.includes('Login')) return 'var(--success)';
+            if (action.includes('delete') || action.includes('Delete') || action.includes('remove')) return 'var(--danger)';
+            if (action.includes('create') || action.includes('Create') || action.includes('add')) return 'var(--info)';
+            if (action.includes('update') || action.includes('Update') || action.includes('edit')) return 'var(--warning)';
+            return 'var(--gray-text)';
+        }
+        
+        // 6. CONFIGURAÇÕES DO SISTEMA
+        function loadSettingsSystem() {
+            return `
+                <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border); margin-bottom: 24px;">
+                    <h2 style="color: var(--white-soft); margin-bottom: 20px; font-size: 18px;">
+                        <i class="fas fa-server"></i> Configurações do Sistema
+                    </h2>
+                    
+                    <div style="display: grid; gap: 20px;">
+                        <!-- Módulos do Sistema -->
+                        <div>
+                            <h3 style="color: var(--white-soft); font-size: 16px; margin-bottom: 12px;">
+                                Módulos do Sistema
+                            </h3>
+                            <div style="display: grid; gap: 12px;">
+                                ${['Chat', 'Tickets', 'Kanban', 'Agenda', 'Ranking', 'Conquistas'].map(module => `
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px; background: var(--black-dark); border-radius: 8px; border: 1px solid var(--gray-border);">
+                                        <span style="color: var(--white-soft); font-size: 14px;">${module}</span>
+                                        <div class="toggle-switch active" style="cursor: pointer;">
+                            </div>
+                            </div>
+                                `).join('')}
+                        </div>
+                    </div>
+                    
+                        <!-- Ações do Sistema -->
+                            <div>
+                            <h3 style="color: var(--white-soft); font-size: 16px; margin-bottom: 12px;">
+                                Ações do Sistema
+                            </h3>
+                            <div style="display: flex; flex-wrap: wrap; gap: 12px;">
+                                <button class="btn btn-secondary" onclick="clearCache()">
+                                    <i class="fas fa-broom"></i> Limpar Cache Local
+                                </button>
+                                <button class="btn btn-secondary" onclick="exportSystemData()">
+                                    <i class="fas fa-download"></i> Exportar Dados (JSON)
+                                </button>
+                                ${currentUser.role === 'Owner' ? `
+                                <button class="btn btn-danger" onclick="resetSystemSettings()">
+                                    <i class="fas fa-undo"></i> Resetar Configurações
+                                </button>
+                                ` : ''}
+                            </div>
+                        </div>
+                        </div>
+                    </div>
+            `;
+        }
+
+        // ========== FUNÇÕES OBRIGATÓRIAS ==========
+        
+        // Salvar configuração do sistema
+        async function saveSystemSetting(key, value) {
+            try {
+                const settings = getData('txd_system_settings') || {};
+                settings[key] = value;
+                await saveData('txd_system_settings', settings);
+                
+                // Log da ação
+                logSystemAction('Configuração atualizada', 'Sistema', { key, value });
+                
+                return true;
+            } catch (error) {
+                console.error('Erro ao salvar configuração:', error);
+                return false;
+            }
+        }
+        
+        // Criar novo cargo
+        function createRole(roleName, permissions, level = 'operational') {
+            if (!hasPermission('permission.manage') && currentUser.role !== 'Owner' && currentUser.role !== 'CEO') {
+                alert('Você não tem permissão para criar cargos.');
+                return false;
+            }
+            
+            if (ROLE_PERMISSIONS[roleName]) {
+                alert('Este cargo já existe.');
+                return false;
+            }
+            
+            ROLE_PERMISSIONS[roleName] = permissions;
+            
+            logSystemAction('Cargo criado', 'Permissões', { role: roleName, permissions, level });
+            
+            loadSettingsSection('cargos');
+            return true;
+        }
+        
+        // Atualizar permissões de um cargo
+        function updateRolePermissions(role, permissions) {
+            if (!hasPermission('permission.manage') && currentUser.role !== 'Owner' && currentUser.role !== 'CEO') {
+                alert('Você não tem permissão para editar permissões.');
+                return false;
+            }
+            
+            if (role === 'Owner' || role === 'CEO') {
+                alert('Não é possível alterar permissões de Owner ou CEO.');
+                return false;
+            }
+            
+            ROLE_PERMISSIONS[role] = permissions;
+            
+            logSystemAction('Permissões atualizadas', 'Permissões', { role, permissions });
+            
+            loadSettingsSection('cargos');
+            return true;
+        }
+        
+        // Registrar ação do sistema (logs)
+        function logSystemAction(action, module, metadata = {}) {
+            try {
+                const logsRaw = getData('txd_system_logs');
+                const logs = Array.isArray(logsRaw) ? logsRaw : [];
+                const logEntry = {
+                    id: Date.now(),
+                    user_id: currentUser?.id || 'system',
+                    user_name: currentUser?.name || 'Sistema',
+                    action: action,
+                    module: module,
+                    timestamp: new Date().toISOString(),
+                    metadata: metadata,
+                    ip: 'N/A' // Será implementado quando houver backend
+                };
+                
+                logs.push(logEntry);
+                
+                // Manter apenas últimos 1000 logs
+                if (logs.length > 1000) {
+                    logs.shift();
+                }
+                
+                saveData('txd_system_logs', logs);
+                
+                return true;
+            } catch (error) {
+                console.error('Erro ao registrar log:', error);
+                return false;
+            }
+        }
+        
+        // Funções auxiliares para as abas
+        function saveAllGeneralSettings() {
+            const systemName = document.getElementById('systemName')?.value;
+            const logoUrl = document.getElementById('logoUrl')?.value;
+            const globalMessage = document.getElementById('globalMessage')?.value;
+            
+            if (systemName) saveSystemSetting('systemName', systemName);
+            if (logoUrl !== undefined) saveSystemSetting('logoUrl', logoUrl);
+            if (globalMessage !== undefined) saveSystemSetting('globalMessage', globalMessage);
+            
+            alert('Configurações gerais salvas com sucesso!');
+            logSystemAction('Configurações gerais atualizadas', 'Sistema', { systemName, logoUrl });
+        }
+        
+        function toggleMaintenanceMode() {
+            const settings = getData('txd_system_settings') || {};
+            settings.maintenanceMode = !settings.maintenanceMode;
+            saveData('txd_system_settings', settings);
+            loadSettingsSection('geral');
+            logSystemAction('Modo manutenção alterado', 'Sistema', { maintenanceMode: settings.maintenanceMode });
+        }
+        
+        function saveAllSecuritySettings() {
+            const sessionTimeout = parseInt(document.getElementById('sessionTimeout')?.value) || 30;
+            const maxLoginAttempts = parseInt(document.getElementById('maxLoginAttempts')?.value) || 5;
+            
+            const settings = {
+                sessionTimeout,
+                maxLoginAttempts,
+                autoLogout: document.getElementById('autoLogoutToggle')?.classList.contains('active'),
+                requireTermsAcceptance: document.getElementById('termsToggle')?.classList.contains('active'),
+                blockedIPs: getData('txd_security_settings')?.blockedIPs || []
+            };
+            
+            saveData('txd_security_settings', settings);
+            alert('Configurações de segurança salvas com sucesso!');
+            logSystemAction('Configurações de segurança atualizadas', 'Segurança', settings);
+        }
+        
+        function toggleAutoLogout() {
+            const settings = getData('txd_security_settings') || {};
+            settings.autoLogout = !settings.autoLogout;
+            saveData('txd_security_settings', settings);
+            loadSettingsSection('seguranca');
+        }
+        
+        function toggleTermsRequirement() {
+            const settings = getData('txd_security_settings') || {};
+            settings.requireTermsAcceptance = !settings.requireTermsAcceptance;
+            saveData('txd_security_settings', settings);
+            loadSettingsSection('seguranca');
+        }
+        
+        function unblockIP(ip) {
+            const settings = getData('txd_security_settings') || {};
+            if (settings.blockedIPs) {
+                settings.blockedIPs = settings.blockedIPs.filter(blockedIP => blockedIP !== ip);
+                saveData('txd_security_settings', settings);
+                loadSettingsSection('seguranca');
+                logSystemAction('IP desbloqueado', 'Segurança', { ip });
+            }
+        }
+        
+        function exportLogs() {
+            const logsRaw = getData('txd_system_logs');
+            const logs = Array.isArray(logsRaw) ? logsRaw : [];
+            const dataStr = JSON.stringify(logs, null, 2);
+            const dataBlob = new Blob([dataStr], { type: 'application/json' });
+            const url = URL.createObjectURL(dataBlob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `txd_logs_${new Date().toISOString().split('T')[0]}.json`;
+            link.click();
+            logSystemAction('Logs exportados', 'Sistema', { count: logs.length });
+        }
+        
+        function clearCache() {
+            if (confirm('Tem certeza que deseja limpar o cache local? Isso não afetará os dados no Supabase.')) {
+                localStorage.removeItem('txd_dataCache');
+                dataCache = {};
+                alert('Cache limpo com sucesso!');
+                logSystemAction('Cache limpo', 'Sistema', {});
+            }
+        }
+        
+        function exportSystemData() {
+            const allData = {
+                staff: getData('txd_staff') || [],
+                tickets: getData('txd_tickets') || [],
+                events: getData('txd_events') || [],
+                commands: getData('txd_commands') || [],
+                settings: getData('txd_system_settings') || {},
+                security: getData('txd_security_settings') || {},
+                logs: getData('txd_system_logs') || []
+            };
+            
+            const dataStr = JSON.stringify(allData, null, 2);
+            const dataBlob = new Blob([dataStr], { type: 'application/json' });
+            const url = URL.createObjectURL(dataBlob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `txd_backup_${new Date().toISOString().split('T')[0]}.json`;
+            link.click();
+            logSystemAction('Dados exportados', 'Sistema', {});
+        }
+        
+        function resetSystemSettings() {
+            if (currentUser.role !== 'Owner') {
+                alert('Apenas o Owner pode resetar as configurações do sistema.');
+                return;
+            }
+            
+            if (confirm('ATENÇÃO: Esta ação irá resetar TODAS as configurações do sistema. Tem certeza?')) {
+                if (confirm('Esta ação é IRREVERSÍVEL. Confirme novamente.')) {
+                    localStorage.removeItem('txd_system_settings');
+                    localStorage.removeItem('txd_security_settings');
+                    localStorage.removeItem('txd_discord_config');
+                    alert('Configurações resetadas. A página será recarregada.');
+                    logSystemAction('Configurações resetadas', 'Sistema', {});
+                    location.reload();
+                }
+            }
+        }
+        
+        function editRole(role) {
+            alert('Funcionalidade de edição de cargo será implementada em breve.');
+        }
+        
+        function deleteRole(role) {
+            if (confirm(`Tem certeza que deseja excluir o cargo "${role}"?`)) {
+                delete ROLE_PERMISSIONS[role];
+                loadSettingsSection('cargos');
+                logSystemAction('Cargo excluído', 'Permissões', { role });
+            }
+        }
+        
+        function openNewRoleModal() {
+            alert('Modal de criação de cargo será implementado em breve.');
         }
 
         // ========== FUNÇÕES DE INTEGRAÇÃO DISCORD ==========
-        function toggleDiscordIntegration() {
+        async function toggleDiscordIntegration() {
             try {
                 console.log('Toggle Discord - Estado antes:', discordConfig.enabled);
                 
@@ -5946,8 +6921,13 @@
                 
                 console.log('Toggle Discord - Estado depois:', discordConfig.enabled);
                 
-                // Salvar no Supabase
-                saveDiscordConfig();
+                // Salvar no Supabase e aguardar conclusão
+                const saved = await saveDiscordConfig();
+                
+                if (!saved) {
+                    alert('Erro ao salvar configuração. Tente novamente.');
+                    return;
+                }
                 
                 console.log('Toggle Discord - Salvo no Supabase');
                 console.log('Toggle Discord - Config completa:', discordConfig);
@@ -6007,10 +6987,20 @@
                 
                 // Recarregar configurações DEPOIS para não perder o foco
                 console.log('Toggle Discord - Recarregando configurações...');
-                setTimeout(() => {
-                    loadSettings();
+                setTimeout(async () => {
+                    // Aguardar um pouco para garantir que o saveData foi processado
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                    
+                    // Recarregar config antes de recarregar a página
+                    discordConfig = getDiscordConfig();
+                    console.log('Toggle Discord - Config recarregada antes de atualizar UI:', discordConfig);
+                    
+                    // Atualizar apenas a aba Discord, não toda a página
+                    if (activeSettingsTab === 'discord') {
+                        loadSettingsSection('discord');
+                    }
                     console.log('Toggle Discord - Configurações recarregadas!');
-                }, 100);
+                }, 500);
                 
             } catch (error) {
                 console.error('Erro ao ativar/desativar Discord:', error);
@@ -6018,37 +7008,77 @@
             }
         }
 
-        function toggleNotification(type) {
+        async function toggleNotification(type) {
+            // Buscar config mais recente
+            discordConfig = getDiscordConfig();
             discordConfig.notifications[type] = !discordConfig.notifications[type];
-            saveDiscordConfig();
-            loadSettings();
+            await saveDiscordConfig();
+            loadSettingsSection('discord');
         }
 
-        function saveWebhook(type, value) {
+        async function saveWebhook(type, value) {
+            // Buscar config mais recente
+            discordConfig = getDiscordConfig();
             discordConfig.webhooks[type] = value;
-            saveDiscordConfig();
+            await saveDiscordConfig();
+            
+            // Feedback visual
+            const btn = event?.target?.closest('.webhook-btn');
+            if (btn) {
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '<i class="fas fa-check"></i> Salvo!';
+                btn.style.background = 'var(--success)';
+                setTimeout(() => {
+                    btn.innerHTML = originalText;
+                    btn.style.background = '';
+                }, 2000);
+            }
         }
 
-        function saveDiscordConfig() {
+        async function saveDiscordConfig() {
+            try {
             console.log('saveDiscordConfig() - Salvando:', discordConfig);
-            saveData('txd_discord_config', discordConfig);
+                await saveData('txd_discord_config', discordConfig);
+                
+                // Aguardar um pouco para garantir que o cache foi atualizado
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+                // Atualizar variável global para manter sincronização
+                discordConfig = getDiscordConfig();
             
             // Verificar se salvou corretamente
             const saved = getData('txd_discord_config');
             console.log('saveDiscordConfig() - Verificação:', saved);
+                console.log('saveDiscordConfig() - Variável global atualizada:', discordConfig);
+                
+                return true;
+            } catch (error) {
+                console.error('Erro ao salvar configuração Discord:', error);
+                return false;
+            }
         }
 
         function testWebhook(type) {
-            const webhookUrl = discordConfig.webhooks[type];
+            // Buscar configuração mais recente
+            const currentConfig = getDiscordConfig();
+            const webhookUrl = currentConfig.webhooks[type];
             
-            if (!webhookUrl) {
-                alert('Configure o webhook antes de testar!');
+            if (!webhookUrl || webhookUrl.trim() === '') {
+                alert('⚠️ Configure o webhook antes de testar!\n\n1. Vá até o Discord\n2. Crie um webhook no canal desejado\n3. Cole a URL aqui');
                 return;
             }
             
+            // Validar formato da URL
+            if (!webhookUrl.startsWith('https://discord.com/api/webhooks/')) {
+                alert('❌ URL do webhook inválida!\n\nA URL deve começar com: https://discord.com/api/webhooks/');
+                return;
+            }
+            
+            console.log('🧪 Testando webhook:', type, webhookUrl.substring(0, 50) + '...');
+            
             const embed = {
                 title: '✅ Teste de Webhook',
-                description: `Este é um teste do webhook ${type === 'main' ? 'principal' : `de ${type}`}`,
+                description: `Este é um teste do webhook ${type === 'main' ? 'principal' : `de ${type}`}. Se você está vendo esta mensagem, a integração está funcionando! 🎉`,
                 color: 5814783, // Cor verde
                 fields: [
                     {
@@ -6065,10 +7095,15 @@
                         name: '👤 Testado por',
                         value: currentUser?.displayName || currentUser?.name || 'Usuário',
                         inline: true
+                    },
+                    {
+                        name: '🔗 Tipo de Webhook',
+                        value: type === 'main' ? 'Principal' : type.charAt(0).toUpperCase() + type.slice(1),
+                        inline: false
                     }
                 ],
                 footer: {
-                    text: 'TXD Staff System'
+                    text: 'TXD Staff System - Teste de Integração'
                 },
                 timestamp: new Date().toISOString()
             };
@@ -6078,6 +7113,57 @@
                 avatar_url: 'https://i.imgur.com/4M34hi2.png',
                 embeds: [embed]
             });
+            
+            // Feedback visual
+            setTimeout(() => {
+                alert('✅ Mensagem de teste enviada!\n\nVerifique o canal do Discord para confirmar o recebimento.');
+            }, 1000);
+        }
+        
+        // Função de diagnóstico da integração Discord
+        function diagnoseDiscordIntegration() {
+            const config = getDiscordConfig();
+            const diagnostics = {
+                enabled: config.enabled,
+                hasMainWebhook: !!(config.webhooks?.main && config.webhooks.main.trim() !== ''),
+                hasTicketsWebhook: !!(config.webhooks?.tickets && config.webhooks.tickets.trim() !== ''),
+                hasEventsWebhook: !!(config.webhooks?.events && config.webhooks.events.trim() !== ''),
+                hasLogsWebhook: !!(config.webhooks?.logs && config.webhooks.logs.trim() !== ''),
+                notificationsEnabled: {
+                    chat: config.notifications?.chat || false,
+                    tasks: config.notifications?.tasks || false,
+                    tickets: config.notifications?.tickets || false,
+                    events: config.notifications?.events || false,
+                    achievements: config.notifications?.achievements || false,
+                    staff: config.notifications?.staff || false
+                }
+            };
+            
+            console.log('🔍 Diagnóstico da Integração Discord:', diagnostics);
+            
+            let message = '🔍 DIAGNÓSTICO DA INTEGRAÇÃO DISCORD\n\n';
+            message += `Status: ${diagnostics.enabled ? '✅ ATIVO' : '❌ INATIVO'}\n\n`;
+            message += 'Webhooks Configurados:\n';
+            message += `  • Principal: ${diagnostics.hasMainWebhook ? '✅' : '❌'}\n`;
+            message += `  • Tickets: ${diagnostics.hasTicketsWebhook ? '✅' : '❌'}\n`;
+            message += `  • Eventos: ${diagnostics.hasEventsWebhook ? '✅' : '❌'}\n`;
+            message += `  • Logs: ${diagnostics.hasLogsWebhook ? '✅' : '❌'}\n\n`;
+            message += 'Notificações Ativas:\n';
+            Object.keys(diagnostics.notificationsEnabled).forEach(key => {
+                const status = diagnostics.notificationsEnabled[key] ? '✅' : '❌';
+                message += `  • ${key}: ${status}\n`;
+            });
+            
+            if (!diagnostics.enabled) {
+                message += '\n⚠️ A integração está DESATIVADA. Ative no painel de configurações.';
+            } else if (!diagnostics.hasMainWebhook) {
+                message += '\n⚠️ Webhook principal não configurado. Configure um webhook para receber notificações.';
+            } else {
+                message += '\n✅ Configuração parece correta!';
+            }
+            
+            alert(message);
+            return diagnostics;
         }
 
         function sendDiscordWebhook(webhookUrl, data) {
@@ -6139,6 +7225,12 @@
                     return;
                 }
                 
+                console.log('Enviando para Discord:', {
+                    url: webhookUrl.substring(0, 50) + '...',
+                    embedTitle: sanitizedData.embeds[0]?.title,
+                    embedDescription: sanitizedData.embeds[0]?.description?.substring(0, 50) + '...'
+                });
+                
                 fetch(webhookUrl, {
                     method: 'POST',
                     headers: {
@@ -6149,15 +7241,29 @@
                 .then(response => {
                     if (response.ok) {
                         console.log('✅ Mensagem enviada com sucesso para o Discord!');
+                        return response.json();
                     } else {
                         // Tentar ler resposta de erro
-                        response.text().then(text => {
-                            console.error('❌ Erro ao enviar mensagem:', response.status, text);
+                        return response.text().then(text => {
+                            console.error('❌ Erro ao enviar mensagem Discord:', {
+                                status: response.status,
+                                statusText: response.statusText,
+                                body: text
+                            });
+                            throw new Error(`Discord retornou erro ${response.status}: ${text}`);
                         });
                     }
                 })
+                .then(data => {
+                    if (data) {
+                        console.log('✅ Resposta do Discord:', data);
+                    }
+                })
                 .catch(error => {
-                    console.error('❌ Erro ao conectar com Discord:', error.message);
+                    console.error('❌ Erro ao conectar com Discord:', {
+                        message: error.message,
+                        stack: error.stack
+                    });
                 });
             } catch (error) {
                 console.error('❌ Erro ao processar dados do Discord:', error);
@@ -6166,21 +7272,36 @@
 
         function sendDiscordNotification(type, title, description, fields = []) {
             try {
-                if (!discordConfig || !discordConfig.enabled) return;
-                if (!discordConfig.notifications || !discordConfig.notifications[type]) return;
+                // Sempre buscar a configuração mais recente
+                const currentConfig = getDiscordConfig();
                 
-                let webhookUrl = discordConfig.webhooks.main;
-                
-                // Usar webhook específico se configurado
-                if (type === 'tickets' && discordConfig.webhooks.tickets) {
-                    webhookUrl = discordConfig.webhooks.tickets;
-                } else if (type === 'events' && discordConfig.webhooks.events) {
-                    webhookUrl = discordConfig.webhooks.events;
-                } else if (type === 'logs' && discordConfig.webhooks.logs) {
-                    webhookUrl = discordConfig.webhooks.logs;
+                if (!currentConfig || !currentConfig.enabled) {
+                    // Discord desabilitado - não fazer nada, não logar
+                    return;
                 }
                 
-                if (!webhookUrl || webhookUrl.trim() === '') return;
+                if (!currentConfig.notifications || !currentConfig.notifications[type]) {
+                    // Tipo de notificação desabilitado - não fazer nada, não logar
+                    return;
+                }
+                
+                let webhookUrl = currentConfig.webhooks.main;
+                
+                // Usar webhook específico se configurado
+                if (type === 'tickets' && currentConfig.webhooks.tickets) {
+                    webhookUrl = currentConfig.webhooks.tickets;
+                } else if (type === 'events' && currentConfig.webhooks.events) {
+                    webhookUrl = currentConfig.webhooks.events;
+                } else if (type === 'logs' && currentConfig.webhooks.logs) {
+                    webhookUrl = currentConfig.webhooks.logs;
+                }
+                
+                if (!webhookUrl || webhookUrl.trim() === '') {
+                    console.log('Webhook URL não configurada para o tipo:', type);
+                    return;
+                }
+                
+                console.log('Enviando notificação Discord:', { type, title, webhookUrl: webhookUrl.substring(0, 50) + '...' });
                 
                 const colors = {
                     chat: 5793266, // Azul
@@ -6235,7 +7356,8 @@
         }
         
         function loadDiscordCommandsLog() {
-            const logs = getData('txd_discord_commands_log') || [];
+            const logsRaw = getData('txd_discord_commands_log');
+            const logs = Array.isArray(logsRaw) ? logsRaw : [];
             if (logs.length === 0) {
                 return '<div style="color: var(--gray-text); font-style: italic;">Nenhum comando recebido ainda.</div>';
             }
@@ -6994,18 +8116,43 @@ processDiscordCommand() diretamente.
                 alert('Você não tem permissão para criar tarefas.');
                 return;
             }
-            document.getElementById('cardId').value = '';
-            document.getElementById('cardModalTitle').textContent = 'Nova Tarefa';
-            document.getElementById('cardColumnId').value = columnId || 'todo';
-            document.getElementById('cardForm').reset();
+            
+            // Garantir que os elementos existem
+            const cardIdInput = document.getElementById('cardId');
+            const cardModalTitle = document.getElementById('cardModalTitle');
+            const cardColumnIdInput = document.getElementById('cardColumnId');
+            const cardForm = document.getElementById('cardForm');
+            const cardModal = document.getElementById('cardModal');
+            
+            if (!cardIdInput || !cardModalTitle || !cardColumnIdInput || !cardForm || !cardModal) {
+                console.error('Elementos do modal de tarefa não encontrados');
+                alert('Erro ao abrir modal de tarefa. Recarregue a página.');
+                return;
+            }
+            
+            cardIdInput.value = '';
+            cardModalTitle.textContent = 'Nova Tarefa';
+            cardColumnIdInput.value = columnId || 'todo';
+            cardForm.reset();
+            
             // Atualizar lista de responsáveis
             refreshData();
             const assigneeSelect = document.getElementById('cardAssignee');
             if (assigneeSelect) {
+                // Garantir que staffData existe e é um array
+                const staff = getData('txd_staff') || [];
+                const staffArray = Array.isArray(staff) ? staff : [];
+                
                 assigneeSelect.innerHTML = '<option value="">Sem responsável</option>' + 
-                    staffData.map(m => `<option value="${m.name}">${m.name} (${m.role})</option>`).join('');
+                    staffArray.map(m => {
+                        if (m && m.name) {
+                            return `<option value="${m.name}">${m.name}${m.role ? ' (' + m.role + ')' : ''}</option>`;
+                        }
+                        return '';
+                    }).filter(opt => opt !== '').join('');
             }
-            document.getElementById('cardModal').classList.add('active');
+            
+            cardModal.classList.add('active');
         }
 
         function addCardToColumn(columnId) {
@@ -7018,70 +8165,142 @@ processDiscordCommand() diretamente.
                 return;
             }
             const kanbanData = getKanbanData();
-            const card = kanbanData.cards.find(c => c.id == cardId);
-            if (card) {
-                document.getElementById('cardId').value = card.id;
-                document.getElementById('cardModalTitle').textContent = 'Editar Tarefa';
-                document.getElementById('cardColumnId').value = card.columnId;
-                document.getElementById('cardTitle').value = card.title;
-                document.getElementById('cardDescription').value = card.description || '';
-                document.getElementById('cardPriority').value = card.priority || '';
-                document.getElementById('cardDueDate').value = card.dueDate || '';
-                document.getElementById('cardAssignee').value = card.assignee || '';
-                document.getElementById('cardTags').value = card.tags ? card.tags.join(', ') : '';
-                // Atualizar lista de responsáveis
-                refreshData();
-                const assigneeSelect = document.getElementById('cardAssignee');
-                if (assigneeSelect) {
-                    assigneeSelect.innerHTML = '<option value="">Sem responsável</option>' + 
-                        staffData.map(m => `<option value="${m.name}">${m.name} (${m.role})</option>`).join('');
-                    assigneeSelect.value = card.assignee || '';
-                }
-                document.getElementById('cardModal').classList.add('active');
+            if (!kanbanData || !Array.isArray(kanbanData.cards)) {
+                alert('Erro ao carregar dados do Kanban.');
+                return;
             }
+            
+            const card = kanbanData.cards.find(c => c && c.id == cardId);
+            if (!card) {
+                alert('Tarefa não encontrada.');
+                return;
+            }
+            
+            // Garantir que os elementos existem
+            const cardIdInput = document.getElementById('cardId');
+            const cardModalTitle = document.getElementById('cardModalTitle');
+            const cardColumnIdInput = document.getElementById('cardColumnId');
+            const cardTitleInput = document.getElementById('cardTitle');
+            const cardDescriptionInput = document.getElementById('cardDescription');
+            const cardPriorityInput = document.getElementById('cardPriority');
+            const cardDueDateInput = document.getElementById('cardDueDate');
+            const cardAssigneeInput = document.getElementById('cardAssignee');
+            const cardTagsInput = document.getElementById('cardTags');
+            const cardModal = document.getElementById('cardModal');
+            
+            if (!cardIdInput || !cardModalTitle || !cardColumnIdInput || !cardTitleInput || !cardModal) {
+                console.error('Elementos do modal de tarefa não encontrados');
+                alert('Erro ao abrir modal de tarefa. Recarregue a página.');
+                return;
+            }
+            
+            cardIdInput.value = card.id;
+            cardModalTitle.textContent = 'Editar Tarefa';
+            cardColumnIdInput.value = card.columnId || 'todo';
+            cardTitleInput.value = card.title || '';
+            if (cardDescriptionInput) cardDescriptionInput.value = card.description || '';
+            if (cardPriorityInput) cardPriorityInput.value = card.priority || '';
+            if (cardDueDateInput) cardDueDateInput.value = card.dueDate || '';
+            if (cardTagsInput) cardTagsInput.value = (card.tags && Array.isArray(card.tags)) ? card.tags.join(', ') : '';
+            
+            // Atualizar lista de responsáveis
+            refreshData();
+            const assigneeSelect = document.getElementById('cardAssignee');
+            if (assigneeSelect) {
+                // Garantir que staffData existe e é um array
+                const staff = getData('txd_staff') || [];
+                const staffArray = Array.isArray(staff) ? staff : [];
+                
+                assigneeSelect.innerHTML = '<option value="">Sem responsável</option>' + 
+                    staffArray.map(m => {
+                        if (m && m.name) {
+                            return `<option value="${m.name}">${m.name}${m.role ? ' (' + m.role + ')' : ''}</option>`;
+                        }
+                        return '';
+                    }).filter(opt => opt !== '').join('');
+                assigneeSelect.value = card.assignee || '';
+            }
+            
+            cardModal.classList.add('active');
         }
 
         function saveCard(event) {
             event.preventDefault();
             
-            const cardId = document.getElementById('cardId').value;
-            const isEdit = cardId && cardId !== '';
-            
-            // Verificar permissões
-            if (isEdit && !hasPermission('task.edit')) {
-                alert('Você não tem permissão para editar tarefas. Apenas Owner, CEO, COO, Diretor e Head Staff podem editar.');
-                return;
-            }
-            if (!isEdit && !hasPermission('task.create')) {
-                alert('Você não tem permissão para criar tarefas.');
-                return;
-            }
-            
-            let kanbanData = getKanbanData();
-            
-            // Garantir que cards é um array
-            if (!Array.isArray(kanbanData.cards)) {
-                kanbanData.cards = [];
-            }
-            
-            const cardData = {
-                id: parseInt(cardId) || Date.now(),
-                columnId: document.getElementById('cardColumnId').value,
-                title: document.getElementById('cardTitle').value,
-                description: document.getElementById('cardDescription').value,
-                priority: document.getElementById('cardPriority').value,
-                dueDate: document.getElementById('cardDueDate').value,
-                assignee: document.getElementById('cardAssignee').value,
-                tags: document.getElementById('cardTags').value.split(',').map(t => t.trim()).filter(t => t),
-                createdAt: isEdit ? (kanbanData.cards.find(c => c.id == cardId)?.createdAt || new Date().toISOString()) : new Date().toISOString(),
-                updatedAt: new Date().toISOString()
-            };
+            try {
+                const cardIdInput = document.getElementById('cardId');
+                const cardColumnIdInput = document.getElementById('cardColumnId');
+                const cardTitleInput = document.getElementById('cardTitle');
+                const cardDescriptionInput = document.getElementById('cardDescription');
+                const cardPriorityInput = document.getElementById('cardPriority');
+                const cardDueDateInput = document.getElementById('cardDueDate');
+                const cardAssigneeInput = document.getElementById('cardAssignee');
+                const cardTagsInput = document.getElementById('cardTags');
+                
+                if (!cardIdInput || !cardColumnIdInput || !cardTitleInput) {
+                    alert('Erro: Elementos do formulário não encontrados. Recarregue a página.');
+                    return;
+                }
+                
+                const cardId = cardIdInput.value;
+                const isEdit = cardId && cardId !== '';
+                
+                // Verificar permissões
+                if (isEdit && !hasPermission('task.edit')) {
+                    alert('Você não tem permissão para editar tarefas.');
+                    return;
+                }
+                if (!isEdit && !hasPermission('task.create')) {
+                    alert('Você não tem permissão para criar tarefas.');
+                    return;
+                }
+                
+                // Validar título (obrigatório)
+                const title = cardTitleInput.value.trim();
+                if (!title) {
+                    alert('Por favor, preencha o título da tarefa.');
+                    cardTitleInput.focus();
+                    return;
+                }
+                
+                let kanbanData = getKanbanData();
+                
+                // Garantir estrutura correta
+                if (!kanbanData) {
+                    kanbanData = { columns: [], cards: [] };
+                }
+                if (!Array.isArray(kanbanData.cards)) {
+                    kanbanData.cards = [];
+                }
+                if (!Array.isArray(kanbanData.columns)) {
+                    kanbanData.columns = [
+                        { id: 'todo', name: 'Para Fazer', color: '#6F7276' },
+                        { id: 'inprogress', name: 'Em Progresso', color: '#ffaa00' },
+                        { id: 'review', name: 'Em Revisão', color: '#3b82f6' },
+                        { id: 'done', name: 'Concluído', color: '#00ff88' }
+                    ];
+                }
+                
+                const cardData = {
+                    id: parseInt(cardId) || Date.now(),
+                    columnId: cardColumnIdInput.value || 'todo',
+                    title: title,
+                    description: cardDescriptionInput ? cardDescriptionInput.value : '',
+                    priority: cardPriorityInput ? cardPriorityInput.value : '',
+                    dueDate: cardDueDateInput ? cardDueDateInput.value : '',
+                    assignee: cardAssigneeInput ? cardAssigneeInput.value : '',
+                    tags: cardTagsInput ? cardTagsInput.value.split(',').map(t => t.trim()).filter(t => t) : [],
+                    createdAt: isEdit ? (kanbanData.cards.find(c => c && c.id == cardId)?.createdAt || new Date().toISOString()) : new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                };
 
             const existingIndex = kanbanData.cards.findIndex(c => c.id == cardData.id);
             if (existingIndex !== -1) {
                 kanbanData.cards[existingIndex] = { ...kanbanData.cards[existingIndex], ...cardData };
                 
-                // Notificar Discord sobre edição de tarefa
+                // Notificar Discord sobre edição de tarefa (apenas se Discord estiver habilitado)
+                const discordConfig = getDiscordConfig();
+                if (discordConfig && discordConfig.enabled && discordConfig.notifications && discordConfig.notifications.tasks) {
                 const columnName = kanbanData.columns.find(col => col.id === cardData.columnId)?.name || cardData.columnId;
                 sendDiscordNotification('tasks', '✏️ Tarefa Editada', 
                     `${currentUser.name} editou uma tarefa`,
@@ -7095,30 +8314,39 @@ processDiscordCommand() diretamente.
                         { name: '👨‍💼 Editado por', value: currentUser.name, inline: true }
                     ]
                 );
+                }
             } else {
                 kanbanData.cards.push(cardData);
                 
-                // Notificar Discord sobre nova tarefa
-                const columnName = kanbanData.columns.find(col => col.id === cardData.columnId)?.name || cardData.columnId;
-                sendDiscordNotification('tasks', '✨ Nova Tarefa Criada', 
-                    `${currentUser.name} criou uma nova tarefa`,
-                    [
-                        { name: '📋 Tarefa', value: cardData.title, inline: false },
-                        { name: '📝 Descrição', value: cardData.description || 'Sem descrição', inline: false },
-                        { name: '📊 Coluna', value: columnName, inline: true },
-                        { name: '⚡ Prioridade', value: cardData.priority === 'high' ? '🔴 Alta' : cardData.priority === 'medium' ? '🟡 Média' : '🟢 Baixa', inline: true },
-                        { name: '📅 Prazo', value: cardData.dueDate || 'Sem prazo', inline: true },
-                        { name: '👤 Responsável', value: cardData.assignee || 'Não atribuído', inline: true },
-                        { name: '🏷️ Tags', value: cardData.tags.length > 0 ? cardData.tags.join(', ') : 'Sem tags', inline: false },
-                        { name: '👨‍💼 Criado por', value: currentUser.name, inline: true }
-                    ]
-                );
+                // Notificar Discord sobre nova tarefa (apenas se Discord estiver habilitado)
+                const discordConfig = getDiscordConfig();
+                if (discordConfig && discordConfig.enabled && discordConfig.notifications && discordConfig.notifications.tasks) {
+                    const columnName = kanbanData.columns.find(col => col.id === cardData.columnId)?.name || cardData.columnId;
+                    sendDiscordNotification('tasks', '✨ Nova Tarefa Criada', 
+                        `${currentUser.name} criou uma nova tarefa`,
+                        [
+                            { name: '📋 Tarefa', value: cardData.title, inline: false },
+                            { name: '📝 Descrição', value: cardData.description || 'Sem descrição', inline: false },
+                            { name: '📊 Coluna', value: columnName, inline: true },
+                            { name: '⚡ Prioridade', value: cardData.priority === 'high' ? '🔴 Alta' : cardData.priority === 'medium' ? '🟡 Média' : '🟢 Baixa', inline: true },
+                            { name: '📅 Prazo', value: cardData.dueDate || 'Sem prazo', inline: true },
+                            { name: '👤 Responsável', value: cardData.assignee || 'Não atribuído', inline: true },
+                            { name: '🏷️ Tags', value: cardData.tags.length > 0 ? cardData.tags.join(', ') : 'Sem tags', inline: false },
+                            { name: '👨‍💼 Criado por', value: currentUser.name, inline: true }
+                        ]
+                    );
+                }
             }
 
-            saveKanbanData(kanbanData);
-            closeModal('cardModal');
-            loadKanban();
-            alert('Tarefa salva com sucesso!');
+                saveKanbanData(kanbanData);
+                closeModal('cardModal');
+                loadKanban();
+                alert('Tarefa salva com sucesso!');
+                
+            } catch (error) {
+                console.error('Erro ao salvar tarefa:', error);
+                alert('Erro ao salvar tarefa: ' + (error.message || 'Erro desconhecido'));
+            }
         }
 
         function deleteCard(cardId) {
@@ -7141,17 +8369,20 @@ processDiscordCommand() diretamente.
             saveKanbanData(kanbanData);
             loadKanban();
             
-            // Notificar Discord sobre exclusão
+            // Notificar Discord sobre exclusão (apenas se Discord estiver habilitado)
             if (deletedCard) {
-                sendDiscordNotification('tasks', '❌ Tarefa Excluída', 
-                    `${currentUser.name} excluiu uma tarefa`,
-                    [
-                        { name: '📋 Tarefa', value: deletedCard.title, inline: false },
-                        { name: '📝 Descrição', value: deletedCard.description || 'Sem descrição', inline: false },
-                        { name: '👨‍💼 Excluído por', value: currentUser.name, inline: true },
-                        { name: '🕐 Horário', value: new Date().toLocaleString('pt-BR'), inline: true }
-                    ]
-                );
+                const discordConfig = getDiscordConfig();
+                if (discordConfig && discordConfig.enabled && discordConfig.notifications && discordConfig.notifications.tasks) {
+                    sendDiscordNotification('tasks', '❌ Tarefa Excluída', 
+                        `${currentUser.name} excluiu uma tarefa`,
+                        [
+                            { name: '📋 Tarefa', value: deletedCard.title, inline: false },
+                            { name: '📝 Descrição', value: deletedCard.description || 'Sem descrição', inline: false },
+                            { name: '👨‍💼 Excluído por', value: currentUser.name, inline: true },
+                            { name: '🕐 Horário', value: new Date().toLocaleString('pt-BR'), inline: true }
+                        ]
+                    );
+                }
             }
             
             alert('Tarefa excluída com sucesso!');
@@ -7173,7 +8404,22 @@ processDiscordCommand() diretamente.
         }
 
         function initializeKanbanDragDrop() {
+            // Limpar event listeners anteriores se existirem
+            const existingColumns = document.querySelectorAll('.kanban-cards');
+            existingColumns.forEach(column => {
+                // Clonar elementos para remover event listeners antigos
+                const newColumn = column.cloneNode(true);
+                column.parentNode.replaceChild(newColumn, column);
+            });
+            
+            // Buscar colunas novamente após clonar
             const columns = document.querySelectorAll('.kanban-cards');
+            
+            if (columns.length === 0) {
+                console.warn('Nenhuma coluna Kanban encontrada para inicializar drag and drop');
+                return;
+            }
+            
             columns.forEach(column => {
                 column.addEventListener('dragover', (e) => {
                     e.preventDefault();
@@ -7215,19 +8461,28 @@ processDiscordCommand() diretamente.
                             saveKanbanData(kanbanData);
                             loadKanban();
                             
-                            // Notificar Discord sobre movimentação de tarefa
+                            // Notificar Discord sobre movimentação de tarefa (apenas se Discord estiver habilitado)
+                            // Verificar ANTES de chamar getDiscordConfig para evitar logs desnecessários
                             if (oldColumnId !== newColumnId) {
-                                sendDiscordNotification('tasks', '🔄 Tarefa Movida', 
-                                    `${currentUser.name} moveu uma tarefa`,
-                                    [
-                                        { name: '📋 Tarefa', value: card.title, inline: false },
-                                        { name: '📤 De', value: oldColumnName, inline: true },
-                                        { name: '📥 Para', value: newColumnName, inline: true },
-                                        { name: '👤 Responsável', value: card.assignee || 'Não atribuído', inline: true },
-                                        { name: '👨‍💼 Movido por', value: currentUser.name, inline: true },
-                                        { name: '🕐 Horário', value: new Date().toLocaleString('pt-BR'), inline: true }
-                                    ]
-                                );
+                                // Verificar se Discord está habilitado sem chamar getDiscordConfig (que loga)
+                                const storedConfig = getData('txd_discord_config');
+                                if (storedConfig && storedConfig.enabled === true && storedConfig.notifications && storedConfig.notifications.tasks === true) {
+                                    // Só chamar getDiscordConfig se realmente precisar enviar notificação
+                                    const discordConfig = getDiscordConfig();
+                                    if (discordConfig && discordConfig.enabled && discordConfig.notifications && discordConfig.notifications.tasks) {
+                                        sendDiscordNotification('tasks', '🔄 Tarefa Movida', 
+                                            `${currentUser.name} moveu uma tarefa`,
+                                            [
+                                                { name: '📋 Tarefa', value: card.title, inline: false },
+                                                { name: '📤 De', value: oldColumnName, inline: true },
+                                                { name: '📥 Para', value: newColumnName, inline: true },
+                                                { name: '👤 Responsável', value: card.assignee || 'Não atribuído', inline: true },
+                                                { name: '👨‍💼 Movido por', value: currentUser.name, inline: true },
+                                                { name: '🕐 Horário', value: new Date().toLocaleString('pt-BR'), inline: true }
+                                            ]
+                                        );
+                                    }
+                                }
                             }
                         }
                         
