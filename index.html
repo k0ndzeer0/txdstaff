@@ -2697,23 +2697,45 @@
                                 .select('*')
                                 .order('requested_at', { ascending: false });
                             if (!requestsError && requestsData) {
+                                console.log('📊 Dados brutos do Supabase:', requestsData);
+                                console.log('📊 Primeira solicitação (exemplo):', requestsData[0]);
+                                console.log('📊 Campos disponíveis:', requestsData[0] ? Object.keys(requestsData[0]) : 'Nenhum dado');
+                                
                                 // Converter para camelCase e garantir campos necessários
-                                data = (requestsData || []).map(req => ({
-                                    id: req.id,
-                                    username: req.username || req.login,
-                                    displayName: req.display_name || req.displayName,
-                                    password: req.password,
-                                    status: req.status || 'pending',
-                                    requestedAt: req.requested_at || req.requestedAt,
-                                    requestedBy: req.requested_by || req.requestedBy,
-                                    approvedBy: req.approved_by || req.approvedBy,
-                                    approvedAt: req.approved_at || req.approvedAt,
-                                    rejectionReason: req.rejection_reason || req.rejectionReason,
-                                    gameId: req.game_id || req.gameId,
-                                    discordId: req.discord_id || req.discordId,
-                                    area: req.area
-                                }));
-                                console.log('Solicitações carregadas do Supabase:', data.length, data);
+                                // Mapear todos os campos possíveis
+                                data = (requestsData || []).map(req => {
+                                    // Log para debug
+                                    if (requestsData.indexOf(req) === 0) {
+                                        console.log('🔍 Mapeando primeira solicitação:', req);
+                                    }
+                                    
+                                    return {
+                                        id: req.id,
+                                        username: req.username || req.login || req.name || req.user || '',
+                                        displayName: req.display_name || req.displayName || req.display_name || req.name || req.username || '',
+                                        password: req.password || '',
+                                        status: (req.status || 'pending').toLowerCase().trim(),
+                                        requestedAt: req.requested_at || req.requestedAt || req.created_at || req.timestamp || new Date().toISOString(),
+                                        requestedBy: req.requested_by || req.requestedBy || req.username || req.name || '',
+                                        approvedBy: req.approved_by || req.approvedBy || null,
+                                        approvedAt: req.approved_at || req.approvedAt || null,
+                                        rejectionReason: req.rejection_reason || req.rejectionReason || null,
+                                        gameId: req.game_id || req.gameId || null,
+                                        discordId: req.discord_id || req.discordId || null,
+                                        area: req.area || null,
+                                        // Manter dados originais para debug
+                                        _raw: req
+                                    };
+                                });
+                                console.log('✅ Solicitações mapeadas:', data.length);
+                                console.log('📋 Primeira solicitação mapeada:', data[0]);
+                                console.log('📋 Todas as solicitações:', data);
+                                
+                                // IMPORTANTE: Garantir que data não seja undefined
+                                if (!data || data.length === 0) {
+                                    console.warn('⚠️ Nenhuma solicitação foi mapeada!');
+                                    data = [];
+                                }
                             } else if (requestsError) {
                                 // Se a tabela não existir (404), retornar array vazio
                                 if (requestsError.code === 'PGRST116' || requestsError.message?.includes('404')) {
@@ -2733,6 +2755,8 @@
                 
                 // Atualizar cache
                 dataCache[key] = data;
+                console.log(`💾 Cache atualizado para '${key}':`, data.length, 'itens');
+                console.log(`💾 Cache['${key}'] =`, dataCache[key]);
                 return data;
                 
             } catch (error) {
@@ -3545,6 +3569,22 @@
                 
                 console.log('📝 Criando solicitação:', request);
                 console.log('🔍 Tentando salvar no Supabase...');
+                console.log('🔗 URL do Supabase:', SUPABASE_URL);
+                console.log('📊 Tabela: registration_requests');
+                
+                // TESTE: Verificar se a tabela existe primeiro
+                const { data: testData, error: testError } = await supabaseClient
+                    .from('registration_requests')
+                    .select('id')
+                    .limit(1);
+                
+                if (testError && (testError.code === 'PGRST116' || testError.message?.includes('does not exist'))) {
+                    console.error('❌ TABELA NÃO EXISTE!');
+                    alert('❌ ERRO CRÍTICO: A tabela registration_requests não existe no Supabase!\n\nPor favor, execute o SQL de criação da tabela no Supabase SQL Editor.\n\nVerifique o console para mais detalhes.');
+                    return;
+                }
+                
+                console.log('✅ Tabela existe. Prosseguindo com inserção...');
                 
                 // Salvar diretamente no Supabase (não usar saveData que espera array)
                 const { data: savedRequest, error: saveError } = await supabaseClient
@@ -3618,15 +3658,34 @@
                 
                 // Fechar modal e mostrar mensagem
                 closeModal('registerModal');
-                alert('✅ Solicitação de cadastro enviada com sucesso!\n\nAguarde a aprovação de um administrador. Você receberá uma notificação quando sua solicitação for analisada.');
+                
+                // Mostrar mensagem de sucesso com detalhes
+                const successMsg = `✅ Solicitação de cadastro enviada com sucesso!
+
+👤 Usuário: ${username}
+📛 Nome: ${displayName}
+🕐 Data: ${new Date().toLocaleString('pt-BR')}
+
+Aguarde a aprovação de um administrador. Você receberá uma notificação quando sua solicitação for analisada.
+
+💡 Dica: Um administrador pode ver sua solicitação na seção "Controle" do painel.`;
+                
+                alert(successMsg);
                 
                 // Limpar formulário
                 form.reset();
                 
-                // Se estiver na seção de controle, recarregar
+                // Forçar refresh imediato do painel de controle se estiver aberto
                 if (currentSection === 'controle') {
-                    setTimeout(() => loadStaffControl(), 1500);
+                    console.log('🔄 Recarregando painel de controle...');
+                    setTimeout(async () => {
+                        await loadStaffControl();
+                        console.log('✅ Painel recarregado');
+                    }, 1000);
                 }
+                
+                // Notificar qualquer admin logado via real-time (já está configurado)
+                console.log('📢 Solicitação salva. Real-time deve notificar admins automaticamente.');
                 
             } catch (error) {
                 console.error('❌ Erro ao criar solicitação:', error);
@@ -3665,9 +3724,9 @@
             confirmBtn.disabled = !checkbox.checked;
         }
 
-        function acceptTerms() {
+        async function acceptTerms() {
             // Processar registro após aceitar termos
-            handleRegister();
+            await handleRegister();
             closeModal('termsModal');
         }
 
@@ -4393,14 +4452,18 @@
             if (!Array.isArray(staffData)) staffData = [];
             
             // Forçar refresh das solicitações do Supabase
-            await getData('txd_registration_requests', true);
+            console.log('🔄 Forçando refresh das solicitações...');
+            const requestsRaw = await getData('txd_registration_requests', true);
+            console.log('📥 Dados retornados do getData:', requestsRaw);
+            console.log('📥 Tipo:', typeof requestsRaw);
+            console.log('📥 É array?', Array.isArray(requestsRaw));
             
             // Buscar solicitações pendentes
-            const requestsRaw = getData('txd_registration_requests');
             const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
             
-            console.log('Total de solicitações carregadas:', requests.length);
-            console.log('Todas as solicitações:', requests);
+            console.log('📊 Total de solicitações carregadas:', requests.length);
+            console.log('📊 Todas as solicitações:', requests);
+            console.log('💾 Estado do cache:', dataCache['txd_registration_requests']);
             
             // Filtrar por status 'pending' (case-insensitive e verificando diferentes formatos)
             const pendingRequests = requests.filter(r => {
@@ -4530,23 +4593,38 @@
                 console.log('📊 Dados diretos do Supabase:', directData);
                 
                 // Forçar refresh antes de exibir
-                await getData('txd_registration_requests', true);
+                console.log('🔄 Forçando refresh antes de exibir...');
+                const requestsRaw = await getData('txd_registration_requests', true);
+                console.log('📥 Dados retornados do getData:', requestsRaw);
+                console.log('📥 Tipo:', typeof requestsRaw);
+                console.log('📥 É array?', Array.isArray(requestsRaw));
                 
-                const requestsRaw = getData('txd_registration_requests');
                 const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
                 
                 console.log('📋 Total de solicitações no cache:', requests.length);
                 console.log('📋 Todas as solicitações:', requests);
+                console.log('💾 Estado do cache:', dataCache['txd_registration_requests']);
                 
                 // Filtrar por status 'pending' (case-insensitive e verificando diferentes formatos)
                 const pendingRequests = requests.filter(r => {
-                    if (!r) return false;
+                    if (!r) {
+                        console.warn('⚠️ Solicitação nula encontrada');
+                        return false;
+                    }
                     const status = String(r.status || '').toLowerCase().trim();
-                    return status === 'pending';
+                    const isPending = status === 'pending';
+                    
+                    if (!isPending) {
+                        console.log(`⏭️ Solicitação ${r.id} ignorada - status: "${status}"`);
+                    }
+                    
+                    return isPending;
                 });
                 
                 console.log('✅ Solicitações pendentes encontradas:', pendingRequests.length);
                 console.log('📝 Detalhes das pendentes:', pendingRequests);
+                console.log('📊 Total de solicitações antes do filtro:', requests.length);
+                console.log('📊 Status de todas as solicitações:', requests.map(r => ({ id: r.id, status: r.status })));
                 
                 // Sempre mostrar a tela, mesmo se não houver solicitações pendentes
                 const content = pendingRequests.length === 0 ? `
