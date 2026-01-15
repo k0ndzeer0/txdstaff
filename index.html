@@ -4680,10 +4680,10 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                                 </div>
                                 
                                 <div style="display: flex; gap: 12px; margin-top: 16px;">
-                                    <button class="btn btn-success" onclick="approveRegistration(${request.id})" style="flex: 1;">
+                                    <button class="btn btn-success" onclick="approveRegistration('${request.id}')" style="flex: 1;">
                                         <i class="fas fa-check"></i> Aprovar
                                     </button>
-                                    <button class="btn btn-danger" onclick="rejectRegistration(${request.id})" style="flex: 1;">
+                                    <button class="btn btn-danger" onclick="rejectRegistration('${request.id}')" style="flex: 1;">
                                         <i class="fas fa-times"></i> Rejeitar
                                     </button>
                                 </div>
@@ -4713,22 +4713,99 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             }
             
             try {
-                const requestsRaw = getData('txd_registration_requests');
-                const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
-                const request = requests.find(r => r && r.id === requestId);
+                console.log('🔍 Buscando solicitação ID:', requestId, 'Tipo:', typeof requestId);
+                
+                // Converter ID para número se necessário
+                const requestIdNum = typeof requestId === 'string' ? parseInt(requestId) : requestId;
+                console.log('🔍 ID convertido:', requestIdNum);
+                
+                // Buscar diretamente do Supabase primeiro (tentar como número e string)
+                let directRequest = null;
+                let directError = null;
+                
+                // Tentar como número primeiro
+                const { data: dataNum, error: errorNum } = await supabaseClient
+                    .from('registration_requests')
+                    .select('*')
+                    .eq('id', requestIdNum)
+                    .single();
+                
+                if (!errorNum && dataNum) {
+                    directRequest = dataNum;
+                } else {
+                    // Tentar como string
+                    const { data: dataStr, error: errorStr } = await supabaseClient
+                        .from('registration_requests')
+                        .select('*')
+                        .eq('id', String(requestId))
+                        .single();
+                    
+                    if (!errorStr && dataStr) {
+                        directRequest = dataStr;
+                    } else {
+                        directError = errorStr || errorNum;
+                    }
+                }
+                
+                let request = null;
+                
+                if (!directError && directRequest) {
+                    console.log('✅ Solicitação encontrada no Supabase:', directRequest);
+                    // Converter para formato esperado
+                    request = {
+                        id: directRequest.id,
+                        username: directRequest.username || directRequest.name,
+                        displayName: directRequest.display_name || directRequest.displayName || directRequest.name,
+                        password: directRequest.password,
+                        status: directRequest.status,
+                        requestedAt: directRequest.requested_at || directRequest.requestedAt,
+                        requestedBy: directRequest.requested_by || directRequest.requestedBy,
+                        gameId: directRequest.game_id || directRequest.gameId,
+                        discordId: directRequest.discord_id || directRequest.discordId,
+                        area: directRequest.area
+                    };
+                } else {
+                    console.warn('⚠️ Não encontrado no Supabase, tentando cache...', directError);
+                    // Tentar do cache como fallback
+                    const requestsRaw = await getData('txd_registration_requests', true);
+                    const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
+                    request = requests.find(r => r && (r.id === requestId || String(r.id) === String(requestId)));
+                }
                 
                 if (!request) {
-                    alert('Solicitação não encontrada.');
+                    console.error('❌ Solicitação não encontrada. ID:', requestId);
+                    const allRequests = await getData('txd_registration_requests', true);
+                    console.error('📊 Total de solicitações:', allRequests.length);
+                    console.error('📊 IDs disponíveis:', allRequests.map(r => r?.id));
+                    alert(`Solicitação não encontrada.\n\nID procurado: ${requestId}\n\nRecarregue a página e tente novamente.`);
                     return;
                 }
                 
-                // Atualizar status da solicitação
+                console.log('✅ Solicitação encontrada:', request);
+                
+                // Atualizar status da solicitação diretamente no Supabase
+                const { error: updateError } = await supabaseClient
+                    .from('registration_requests')
+                    .update({
+                        status: 'approved',
+                        approved_by: currentUser.name || currentUser.displayName,
+                        approved_at: new Date().toISOString()
+                    })
+                    .eq('id', request.id);
+                
+                if (updateError) {
+                    console.error('Erro ao atualizar solicitação:', updateError);
+                    throw updateError;
+                }
+                
+                // Atualizar objeto local
                 request.status = 'approved';
                 request.approvedBy = currentUser.name || currentUser.displayName;
                 request.approvedAt = new Date().toISOString();
                 request.role = selectedRole;
                 
-                await saveData('txd_registration_requests', requests);
+                // Limpar cache para forçar refresh
+                delete dataCache['txd_registration_requests'];
                 
                 // Criar usuário no staff
                 const newStaff = {
@@ -4784,22 +4861,97 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             const reason = prompt('Digite o motivo da rejeição (opcional):');
             
             try {
-                const requestsRaw = getData('txd_registration_requests');
-                const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
-                const request = requests.find(r => r && r.id === requestId);
+                console.log('🔍 Buscando solicitação ID para rejeitar:', requestId, 'Tipo:', typeof requestId);
+                
+                // Converter ID para número se necessário
+                const requestIdNum = typeof requestId === 'string' ? parseInt(requestId) : requestId;
+                console.log('🔍 ID convertido:', requestIdNum);
+                
+                // Buscar diretamente do Supabase primeiro (tentar como número e string)
+                let directRequest = null;
+                let directError = null;
+                
+                // Tentar como número primeiro
+                const { data: dataNum, error: errorNum } = await supabaseClient
+                    .from('registration_requests')
+                    .select('*')
+                    .eq('id', requestIdNum)
+                    .single();
+                
+                if (!errorNum && dataNum) {
+                    directRequest = dataNum;
+                } else {
+                    // Tentar como string
+                    const { data: dataStr, error: errorStr } = await supabaseClient
+                        .from('registration_requests')
+                        .select('*')
+                        .eq('id', String(requestId))
+                        .single();
+                    
+                    if (!errorStr && dataStr) {
+                        directRequest = dataStr;
+                    } else {
+                        directError = errorStr || errorNum;
+                    }
+                }
+                
+                let request = null;
+                
+                if (!directError && directRequest) {
+                    console.log('✅ Solicitação encontrada no Supabase:', directRequest);
+                    // Converter para formato esperado
+                    request = {
+                        id: directRequest.id,
+                        username: directRequest.username || directRequest.name,
+                        displayName: directRequest.display_name || directRequest.displayName || directRequest.name,
+                        password: directRequest.password,
+                        status: directRequest.status,
+                        requestedAt: directRequest.requested_at || directRequest.requestedAt,
+                        requestedBy: directRequest.requested_by || directRequest.requestedBy,
+                        gameId: directRequest.game_id || directRequest.gameId,
+                        discordId: directRequest.discord_id || directRequest.discordId,
+                        area: directRequest.area
+                    };
+                } else {
+                    console.warn('⚠️ Não encontrado no Supabase, tentando cache...', directError);
+                    // Tentar do cache como fallback
+                    const requestsRaw = await getData('txd_registration_requests', true);
+                    const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
+                    request = requests.find(r => r && (r.id === requestId || String(r.id) === String(requestId)));
+                }
                 
                 if (!request) {
-                    alert('Solicitação não encontrada.');
+                    console.error('❌ Solicitação não encontrada. ID:', requestId);
+                    alert(`Solicitação não encontrada.\n\nID procurado: ${requestId}\n\nRecarregue a página e tente novamente.`);
                     return;
                 }
                 
-                // Atualizar status da solicitação
+                console.log('✅ Solicitação encontrada para rejeitar:', request);
+                
+                // Atualizar status da solicitação diretamente no Supabase
+                const { error: updateError } = await supabaseClient
+                    .from('registration_requests')
+                    .update({
+                        status: 'rejected',
+                        approved_by: currentUser.name || currentUser.displayName,
+                        approved_at: new Date().toISOString(),
+                        rejection_reason: reason || null
+                    })
+                    .eq('id', request.id);
+                
+                if (updateError) {
+                    console.error('Erro ao atualizar solicitação:', updateError);
+                    throw updateError;
+                }
+                
+                // Atualizar objeto local
                 request.status = 'rejected';
                 request.approvedBy = currentUser.name || currentUser.displayName;
                 request.approvedAt = new Date().toISOString();
                 request.rejectionReason = reason || 'Não especificado';
                 
-                await saveData('txd_registration_requests', requests);
+                // Limpar cache para forçar refresh
+                delete dataCache['txd_registration_requests'];
                 
                 // Notificar Discord
                 sendDiscordNotification('staff', '❌ Cadastro Rejeitado', 
