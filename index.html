@@ -2263,8 +2263,8 @@
                         console.log('Mudança em registration_requests:', payload);
                         // Limpar cache e recarregar
                         delete dataCache['txd_registration_requests'];
-                        // Se estiver na seção de staff, recarregar
-                        if (currentSection === 'staff') {
+                        // Se estiver na seção de controle ou staff, recarregar
+                        if (currentSection === 'controle' || currentSection === 'staff') {
                             setTimeout(() => loadStaffControl(), 500);
                         }
                     }
@@ -2697,7 +2697,23 @@
                                 .select('*')
                                 .order('requested_at', { ascending: false });
                             if (!requestsError && requestsData) {
-                                data = toCamelCase(requestsData || []);
+                                // Converter para camelCase e garantir campos necessários
+                                data = (requestsData || []).map(req => ({
+                                    id: req.id,
+                                    username: req.username || req.login,
+                                    displayName: req.display_name || req.displayName,
+                                    password: req.password,
+                                    status: req.status || 'pending',
+                                    requestedAt: req.requested_at || req.requestedAt,
+                                    requestedBy: req.requested_by || req.requestedBy,
+                                    approvedBy: req.approved_by || req.approvedBy,
+                                    approvedAt: req.approved_at || req.approvedAt,
+                                    rejectionReason: req.rejection_reason || req.rejectionReason,
+                                    gameId: req.game_id || req.gameId,
+                                    discordId: req.discord_id || req.discordId,
+                                    area: req.area
+                                }));
+                                console.log('Solicitações carregadas do Supabase:', data.length, data);
                             } else if (requestsError) {
                                 // Se a tabela não existir (404), retornar array vazio
                                 if (requestsError.code === 'PGRST116' || requestsError.message?.includes('404')) {
@@ -3036,9 +3052,26 @@
                                 // Para cada request, fazer upsert
                                 for (const request of data) {
                                     const convertedRequest = toSnakeCase(request);
-                                    const { error } = await supabaseClient
+                                    
+                                    // Garantir que status está presente
+                                    if (!convertedRequest.status) {
+                                        convertedRequest.status = 'pending';
+                                    }
+                                    
+                                    // Garantir que requested_at está presente
+                                    if (!convertedRequest.requested_at && request.requestedAt) {
+                                        convertedRequest.requested_at = request.requestedAt;
+                                    } else if (!convertedRequest.requested_at) {
+                                        convertedRequest.requested_at = new Date().toISOString();
+                                    }
+                                    
+                                    console.log('Salvando solicitação:', convertedRequest);
+                                    
+                                    const { data: savedRequest, error } = await supabaseClient
                                         .from('registration_requests')
-                                        .upsert(convertedRequest, { onConflict: 'id' });
+                                        .upsert(convertedRequest, { onConflict: 'id' })
+                                        .select();
+                                    
                                     if (error) {
                                         // Se a tabela não existir, mostrar mensagem útil
                                         if (error.code === 'PGRST116' || error.message?.includes('404')) {
@@ -3046,11 +3079,16 @@
                                             console.error('📋 Execute o SQL do arquivo: criar_tabela_registration_requests.sql');
                                             alert('Erro: Tabela registration_requests não existe. Execute o SQL de criação no Supabase.');
                                         } else {
-                                            console.error('Erro ao salvar registration_request:', error);
+                                            console.error('Erro ao salvar registration_request:', error, convertedRequest);
                                         }
                                         throw error;
+                                    } else {
+                                        console.log('Solicitação salva com sucesso:', savedRequest);
                                     }
                                 }
+                                
+                                // Limpar cache após salvar
+                                delete dataCache['txd_registration_requests'];
                             } catch (err) {
                                 // Se for erro de tabela não encontrada, tentar criar via insert direto
                                 if (err.code === 'PGRST116' || err.message?.includes('404')) {
@@ -3482,35 +3520,101 @@
             }
             
             try {
+                // Verificar se Supabase está inicializado
+                if (!supabaseClient) {
+                    console.error('Supabase não está inicializado!');
+                    alert('Erro: Sistema não está conectado ao banco de dados. Recarregue a página.');
+                    return;
+                }
+                
+                console.log('Supabase inicializado:', !!supabaseClient);
+                
                 // Criar solicitação de registro
                 const request = {
                     id: Date.now(),
                     username: username,
-                    displayName: displayName,
+                    display_name: displayName,
                     password: password, // Em produção, isso deve ser criptografado
                     status: 'pending', // pending, approved, rejected
-                    requestedAt: new Date().toISOString(),
-                    requestedBy: username,
-                    approvedBy: null,
-                    approvedAt: null,
-                    rejectionReason: null
+                    requested_at: new Date().toISOString(),
+                    requested_by: username,
+                    approved_by: null,
+                    approved_at: null,
+                    rejection_reason: null
                 };
                 
-                // Salvar solicitação
-                const requests = Array.isArray(existingRequest) ? existingRequest : [];
-                requests.push(request);
-                await saveData('txd_registration_requests', requests);
+                console.log('📝 Criando solicitação:', request);
+                console.log('🔍 Tentando salvar no Supabase...');
+                
+                // Salvar diretamente no Supabase (não usar saveData que espera array)
+                const { data: savedRequest, error: saveError } = await supabaseClient
+                    .from('registration_requests')
+                    .insert(request)
+                    .select();
+                
+                if (saveError) {
+                    console.error('❌ Erro ao salvar solicitação no Supabase:', saveError);
+                    console.error('Detalhes do erro:', {
+                        code: saveError.code,
+                        message: saveError.message,
+                        details: saveError.details,
+                        hint: saveError.hint
+                    });
+                    
+                    if (saveError.code === 'PGRST116' || saveError.message?.includes('404') || saveError.message?.includes('does not exist')) {
+                        alert('❌ Erro: Tabela registration_requests não existe no Supabase.\n\nExecute o SQL de criação da tabela no Supabase SQL Editor.');
+                    } else if (saveError.code === '23505' || saveError.message?.includes('duplicate')) {
+                        alert('⚠️ Este usuário já possui uma solicitação pendente.');
+                    } else {
+                        alert(`❌ Erro ao enviar solicitação:\n\n${saveError.message}\n\nVerifique o console para mais detalhes.`);
+                    }
+                    return;
+                }
+                
+                if (!savedRequest || savedRequest.length === 0) {
+                    console.error('⚠️ Solicitação não foi retornada pelo Supabase');
+                    alert('⚠️ Solicitação enviada, mas não foi possível confirmar o salvamento. Verifique o painel de controle.');
+                } else {
+                    console.log('✅ Solicitação salva com sucesso:', savedRequest);
+                }
+                
+                // Limpar cache para forçar refresh
+                delete dataCache['txd_registration_requests'];
+                
+                // Verificar se a solicitação foi realmente salva
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                // Tentar buscar a solicitação recém-criada para confirmar
+                const { data: verifyData, error: verifyError } = await supabaseClient
+                    .from('registration_requests')
+                    .select('*')
+                    .eq('username', username)
+                    .eq('status', 'pending')
+                    .order('requested_at', { ascending: false })
+                    .limit(1);
+                
+                if (verifyError) {
+                    console.warn('⚠️ Não foi possível verificar a solicitação:', verifyError);
+                } else if (verifyData && verifyData.length > 0) {
+                    console.log('✅ Solicitação confirmada no banco:', verifyData[0]);
+                } else {
+                    console.warn('⚠️ Solicitação não encontrada após salvar. Pode levar alguns segundos para aparecer.');
+                }
                 
                 // Notificar Discord
-                sendDiscordNotification('staff', '📝 Nova Solicitação de Cadastro', 
-                    `Nova solicitação de cadastro recebida`,
-                    [
-                        { name: '👤 Usuário', value: username, inline: true },
-                        { name: '📛 Nome', value: displayName, inline: true },
-                        { name: '🕐 Data', value: new Date().toLocaleString('pt-BR'), inline: true },
-                        { name: '⚠️ Ação Necessária', value: 'Aprovar ou rejeitar no painel administrativo', inline: false }
-                    ]
-                );
+                try {
+                    sendDiscordNotification('staff', '📝 Nova Solicitação de Cadastro', 
+                        `Nova solicitação de cadastro recebida`,
+                        [
+                            { name: '👤 Usuário', value: username, inline: true },
+                            { name: '📛 Nome', value: displayName, inline: true },
+                            { name: '🕐 Data', value: new Date().toLocaleString('pt-BR'), inline: true },
+                            { name: '⚠️ Ação Necessária', value: 'Aprovar ou rejeitar no painel administrativo', inline: false }
+                        ]
+                    );
+                } catch (discordError) {
+                    console.warn('Erro ao notificar Discord:', discordError);
+                }
                 
                 // Fechar modal e mostrar mensagem
                 closeModal('registerModal');
@@ -3519,9 +3623,15 @@
                 // Limpar formulário
                 form.reset();
                 
+                // Se estiver na seção de controle, recarregar
+                if (currentSection === 'controle') {
+                    setTimeout(() => loadStaffControl(), 1500);
+                }
+                
             } catch (error) {
-                console.error('Erro ao criar solicitação:', error);
-                alert('Erro ao enviar solicitação. Tente novamente.');
+                console.error('❌ Erro ao criar solicitação:', error);
+                console.error('Stack trace:', error.stack);
+                alert(`❌ Erro ao enviar solicitação:\n\n${error.message || 'Erro desconhecido'}\n\nVerifique o console para mais detalhes.`);
             }
         }
 
@@ -4278,14 +4388,29 @@
             }, 100);
         }
 
-        function loadStaffControl() {
+        async function loadStaffControl() {
             // Garantir que staffData é um array
             if (!Array.isArray(staffData)) staffData = [];
+            
+            // Forçar refresh das solicitações do Supabase
+            await getData('txd_registration_requests', true);
             
             // Buscar solicitações pendentes
             const requestsRaw = getData('txd_registration_requests');
             const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
-            const pendingRequests = requests.filter(r => r && r.status === 'pending');
+            
+            console.log('Total de solicitações carregadas:', requests.length);
+            console.log('Todas as solicitações:', requests);
+            
+            // Filtrar por status 'pending' (case-insensitive e verificando diferentes formatos)
+            const pendingRequests = requests.filter(r => {
+                if (!r) return false;
+                const status = String(r.status || '').toLowerCase().trim();
+                return status === 'pending';
+            });
+            
+            console.log('Solicitações pendentes encontradas:', pendingRequests.length);
+            console.log('Detalhes das pendentes:', pendingRequests);
             
             const canManage = hasPermission('staff.create') || currentUser.role === 'Owner' || currentUser.role === 'CEO' || currentUser.role === 'HeadStaff';
             
@@ -4298,26 +4423,40 @@
                     <button class="btn-modal" onclick="openNewStaff()">
                         <i class="fas fa-user-plus"></i> Cadastrar Manualmente
                     </button>
-                    ${pendingRequests.length > 0 ? `
-                    <button class="btn-modal btn-warning" onclick="showRegistrationRequests()" style="position: relative;">
-                        <i class="fas fa-user-clock"></i> Solicitações Pendentes
-                        <span style="position: absolute; top: -8px; right: -8px; background: var(--danger); color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600;">
+                    <button class="btn-modal ${pendingRequests.length > 0 ? 'btn-warning' : ''}" onclick="showRegistrationRequests()" style="position: relative;">
+                        <i class="fas fa-user-clock"></i> Solicitações de Cadastro
+                        ${pendingRequests.length > 0 ? `
+                        <span style="position: absolute; top: -8px; right: -8px; background: var(--danger); color: white; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; box-shadow: 0 2px 8px rgba(255, 51, 102, 0.5);">
                             ${pendingRequests.length}
                         </span>
+                        ` : ''}
                     </button>
-                    ` : ''}
                 </div>
                 ` : ''}
                 
-                ${pendingRequests.length > 0 && canManage ? `
-                <div style="background: var(--warning); color: white; padding: 16px; border-radius: 12px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <strong><i class="fas fa-exclamation-triangle"></i> ${pendingRequests.length} solicitação(ões) pendente(s)</strong>
-                        <p style="margin: 4px 0 0 0; font-size: 13px; opacity: 0.9;">Há solicitações de cadastro aguardando aprovação</p>
+                <!-- SEÇÃO DE SOLICITAÇÕES PENDENTES - SEMPRE VISÍVEL -->
+                ${canManage ? `
+                <div style="background: ${pendingRequests.length > 0 ? 'var(--warning)' : 'var(--gray-dark)'}; color: ${pendingRequests.length > 0 ? 'white' : 'var(--gray-light)'}; padding: 20px; border-radius: 12px; margin-bottom: 24px; border: 2px solid ${pendingRequests.length > 0 ? 'var(--warning)' : 'var(--gray-border)'};">
+                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
+                        <div style="flex: 1;">
+                            <h3 style="font-size: 18px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 12px;">
+                                <i class="fas fa-user-clock" style="font-size: 24px;"></i>
+                                Solicitações de Cadastro Pendentes
+                            </h3>
+                            ${pendingRequests.length > 0 ? `
+                            <p style="margin: 0; font-size: 15px; opacity: 0.95;">
+                                <strong>${pendingRequests.length}</strong> ${pendingRequests.length === 1 ? 'solicitação aguardando' : 'solicitações aguardando'} sua aprovação
+                            </p>
+                            ` : `
+                            <p style="margin: 0; font-size: 14px; opacity: 0.8;">
+                                Nenhuma solicitação pendente no momento
+                            </p>
+                            `}
+                        </div>
+                        <button class="btn" onclick="showRegistrationRequests()" style="background: ${pendingRequests.length > 0 ? 'white' : 'var(--gray-medium)'}; color: ${pendingRequests.length > 0 ? 'var(--warning)' : 'var(--gray-light)'}; border: none; padding: 12px 24px; font-weight: 600; white-space: nowrap;">
+                            <i class="fas fa-eye"></i> ${pendingRequests.length > 0 ? 'Ver Solicitações' : 'Ver Todas'}
+                        </button>
                     </div>
-                    <button class="btn" onclick="showRegistrationRequests()" style="background: white; color: var(--warning); border: none;">
-                        Ver Solicitações
-                    </button>
                 </div>
                 ` : ''}
                 
@@ -4364,17 +4503,72 @@
         
         // ========== GERENCIAMENTO DE SOLICITAÇÕES DE CADASTRO ==========
         
-        function showRegistrationRequests() {
-            const requestsRaw = getData('txd_registration_requests');
-            const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
-            const pendingRequests = requests.filter(r => r && r.status === 'pending');
+        async function showRegistrationRequests() {
+            console.log('🔍 Buscando solicitações de registro...');
             
-            if (pendingRequests.length === 0) {
-                alert('Não há solicitações pendentes no momento.');
+            // Verificar se Supabase está inicializado
+            if (!supabaseClient) {
+                alert('❌ Erro: Sistema não está conectado ao banco de dados. Recarregue a página.');
                 return;
             }
             
-            const content = `
+            // Buscar diretamente do Supabase
+            try {
+                const { data: directData, error: directError } = await supabaseClient
+                    .from('registration_requests')
+                    .select('*')
+                    .order('requested_at', { ascending: false });
+                
+                if (directError) {
+                    console.error('❌ Erro ao buscar do Supabase:', directError);
+                    if (directError.code === 'PGRST116' || directError.message?.includes('does not exist')) {
+                        alert('❌ Tabela registration_requests não existe no Supabase.\n\nExecute o SQL de criação da tabela no Supabase SQL Editor.');
+                        return;
+                    }
+                }
+                
+                console.log('📊 Dados diretos do Supabase:', directData);
+                
+                // Forçar refresh antes de exibir
+                await getData('txd_registration_requests', true);
+                
+                const requestsRaw = getData('txd_registration_requests');
+                const requests = Array.isArray(requestsRaw) ? requestsRaw : [];
+                
+                console.log('📋 Total de solicitações no cache:', requests.length);
+                console.log('📋 Todas as solicitações:', requests);
+                
+                // Filtrar por status 'pending' (case-insensitive e verificando diferentes formatos)
+                const pendingRequests = requests.filter(r => {
+                    if (!r) return false;
+                    const status = String(r.status || '').toLowerCase().trim();
+                    return status === 'pending';
+                });
+                
+                console.log('✅ Solicitações pendentes encontradas:', pendingRequests.length);
+                console.log('📝 Detalhes das pendentes:', pendingRequests);
+                
+                // Sempre mostrar a tela, mesmo se não houver solicitações pendentes
+                const content = pendingRequests.length === 0 ? `
+                <div style="margin-bottom: 24px;">
+                    <button class="btn btn-secondary" onclick="loadStaffControl()">
+                        <i class="fas fa-arrow-left"></i> Voltar
+                    </button>
+                </div>
+                
+                <h2 style="color: var(--white-soft); margin-bottom: 24px;">
+                    <i class="fas fa-user-clock"></i> Solicitações de Cadastro Pendentes
+                </h2>
+                
+                <div style="background: var(--gray-dark); border-radius: 12px; padding: 60px 40px; text-align: center; border: 1px solid var(--gray-border);">
+                    <div style="font-size: 64px; margin-bottom: 24px; opacity: 0.3;">📋</div>
+                    <h3 style="color: var(--white-soft); font-size: 20px; margin-bottom: 12px;">Nenhuma solicitação pendente</h3>
+                    <p style="color: var(--gray-text); font-size: 14px; line-height: 1.6;">
+                        Todas as solicitações de cadastro foram processadas.<br>
+                        Novas solicitações aparecerão aqui automaticamente.
+                    </p>
+                </div>
+            ` : `
                 <div style="margin-bottom: 24px;">
                     <button class="btn btn-secondary" onclick="loadStaffControl()">
                         <i class="fas fa-arrow-left"></i> Voltar
@@ -4420,8 +4614,12 @@
                     }).join('')}
                 </div>
             `;
-            
-            document.querySelector('.content-card').innerHTML = content;
+                
+                document.querySelector('.content-card').innerHTML = content;
+            } catch (error) {
+                console.error('❌ Erro ao buscar solicitações:', error);
+                alert(`Erro ao carregar solicitações: ${error.message || 'Erro desconhecido'}`);
+            }
         }
         
         async function approveRegistration(requestId) {
