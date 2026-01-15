@@ -96,6 +96,28 @@
             align-items: center;
             min-height: 100vh;
             padding: 20px;
+            background-image: url('https://tdatgzjwcuatpqhfococ.supabase.co/storage/v1/object/public/logos/Design%20sem%20nome%20(3).jpg');
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+            position: relative;
+        }
+        
+        .login-container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(11, 11, 12, 0.6);
+            z-index: 0;
+        }
+        
+        .login-container > * {
+            position: relative;
+            z-index: 1;
         }
 
         .login-box {
@@ -2242,6 +2264,44 @@
             delete cacheTimestamps[key];
         }
         
+        // Função para atualizar dados em background (stale-while-revalidate)
+        async function refreshDataInBackground(key) {
+            try {
+                const tableName = keyToTableMap[key];
+                if (!tableName || !supabaseClient) return;
+                
+                // Buscar dados atualizados do Supabase em background
+                let data = [];
+                
+                // Usar a mesma lógica do getData, mas sem retornar (só atualiza cache)
+                switch(key) {
+                    case 'txd_staff':
+                        const { data: staffData, error: staffError } = await supabaseClient
+                            .from('staff')
+                            .select('*')
+                            .order('created_at', { ascending: false });
+                        if (!staffError) data = toCamelCase(staffData || []);
+                        break;
+                    default:
+                        // Para outros casos, usar query genérica
+                        const { data: genericData, error: genericError } = await supabaseClient
+                            .from(tableName)
+                            .select('*');
+                        if (!genericError) data = toCamelCase(genericData || []);
+                        break;
+                }
+                
+                // Atualizar cache silenciosamente
+                if (data.length > 0 || Array.isArray(data)) {
+                    dataCache[key] = data;
+                    cacheTimestamps[key] = Date.now();
+                }
+            } catch (error) {
+                // Ignorar erros em background
+                console.warn(`Erro ao atualizar ${key} em background:`, error);
+            }
+        }
+        
         // Subscriptions de real-time
         let realtimeSubscriptions = [];
         
@@ -2438,7 +2498,12 @@
                 if (cacheAge < CACHE_TTL) {
                     return dataCache[key];
                 }
-                // Cache expirado, mas ainda retorna enquanto busca novos dados (stale-while-revalidate)
+                
+                // Cache expirado, mas retorna imediatamente (stale-while-revalidate)
+                // Atualiza em background sem bloquear
+                const staleData = dataCache[key];
+                refreshDataInBackground(key).catch(() => {});
+                return staleData;
             }
             
             // Verificar se Supabase está inicializado
@@ -4168,8 +4233,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         }
 
         async function loadDashboard() {
-            // Carregar apenas dados necessários para o dashboard (usando cache)
-            await loadSectionData('inicio');
+            // Carregar dados em background (não bloqueia renderização)
+            loadSectionData('inicio').catch(() => {});
             
             // Obter nome do usuário
             const userName = currentUser?.name || currentUser?.displayName || 'Staff';
@@ -4322,8 +4387,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         }
 
         async function loadKanban() {
-            // Buscar dados atualizados do Supabase
-            await refreshData();
+            // Usar cache primeiro (muito mais rápido)
             let kanbanData = await getKanbanData();
             
             // Validações robustas para garantir que os dados estão corretos
@@ -4491,9 +4555,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             // Garantir que staffData é um array
             if (!Array.isArray(staffData)) staffData = [];
             
-            // Forçar refresh das solicitações do Supabase
-            console.log('🔄 Forçando refresh das solicitações...');
-            const requestsRaw = await getData('txd_registration_requests', true);
+            // Usar cache primeiro (muito mais rápido), só força refresh se necessário
+            const requestsRaw = await getData('txd_registration_requests', false);
             console.log('📥 Dados retornados do getData:', requestsRaw);
             console.log('📥 Tipo:', typeof requestsRaw);
             console.log('📥 É array?', Array.isArray(requestsRaw));
@@ -4632,9 +4695,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 
                 console.log('📊 Dados diretos do Supabase:', directData);
                 
-                // Forçar refresh antes de exibir
-                console.log('🔄 Forçando refresh antes de exibir...');
-                const requestsRaw = await getData('txd_registration_requests', true);
+                // Usar cache primeiro (muito mais rápido)
+                const requestsRaw = await getData('txd_registration_requests', false);
                 console.log('📥 Dados retornados do getData:', requestsRaw);
                 console.log('📥 Tipo:', typeof requestsRaw);
                 console.log('📥 É array?', Array.isArray(requestsRaw));
@@ -10215,16 +10277,18 @@ processDiscordCommand() diretamente.
             await Promise.all(neededKeys.map(key => getData(key, false)));
         }
         
-        // Atualizar showSection para carregar conteúdo de forma otimizada
+        // Atualizar showSection para carregar conteúdo de forma otimizada (não bloqueia UI)
         const originalShowSectionFunc = showSection;
-        showSection = async function(section) {
+        showSection = function(section) {
             if (originalShowSectionFunc) originalShowSectionFunc(section);
             
-            // Carregar apenas dados necessários para esta seção (lazy loading)
-            await loadSectionData(section);
-            
-            // Carregar conteúdo da seção
+            // Carregar conteúdo imediatamente (usa cache se disponível)
             loadSectionContent(section);
+            
+            // Carregar dados em background (não bloqueia renderização)
+            loadSectionData(section).catch(err => {
+                console.warn('Erro ao carregar dados da seção em background:', err);
+            });
         };
 
         // Inicializar
