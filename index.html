@@ -1775,11 +1775,11 @@
             <form id="registerForm">
                 <div class="input-group">
                     <label>Usuário de Login</label>
-                    <input type="text" placeholder="Ex: zayon.dev" required>
+                    <input type="text" placeholder="Ex: romanov.dev" required>
                 </div>
                 <div class="input-group">
                     <label>Nome de Exibição</label>
-                    <input type="text" placeholder="Ex: Zayon" required>
+                    <input type="text" placeholder="Ex: Romanov" required>
                 </div>
                 <div class="input-group">
                     <label>Senha</label>
@@ -2230,9 +2230,17 @@
             console.error('Supabase não está carregado. Verifique se o script foi incluído corretamente.');
         }
         
-        // Cache local para performance
+        // Cache local para performance com timestamp
         const dataCache = {};
+        const cacheTimestamps = {}; // Armazena quando cada dado foi cacheado
+        const CACHE_TTL = 30000; // 30 segundos - tempo de vida do cache
         let cacheInitialized = false;
+        
+        // Função helper para limpar cache e timestamp
+        function clearCacheKey(key) {
+            delete dataCache[key];
+            delete cacheTimestamps[key];
+        }
         
         // Subscriptions de real-time
         let realtimeSubscriptions = [];
@@ -2262,7 +2270,7 @@
                     (payload) => {
                         console.log('Mudança em registration_requests:', payload);
                         // Limpar cache e recarregar
-                        delete dataCache['txd_registration_requests'];
+                        clearCacheKey('txd_registration_requests');
                         // Se estiver na seção de controle ou staff, recarregar
                         if (currentSection === 'controle' || currentSection === 'staff') {
                             setTimeout(() => loadStaffControl(), 500);
@@ -2311,7 +2319,7 @@
                             }
                         }
                         console.log('Mudança em kanban_cards:', payload);
-                        delete dataCache['txd_kanban'];
+                        clearCacheKey('txd_kanban');
                         reloadKanbanDebounced();
                     }
                 )
@@ -2324,7 +2332,7 @@
                     { event: '*', schema: 'public', table: 'kanban_columns' },
                     (payload) => {
                         console.log('Mudança em kanban_columns:', payload);
-                        delete dataCache['txd_kanban'];
+                        clearCacheKey('txd_kanban');
                         reloadKanbanDebounced();
                     }
                 )
@@ -2338,7 +2346,7 @@
                     { event: '*', schema: 'public', table: 'staff' },
                     (payload) => {
                         console.log('Mudança em staff:', payload);
-                        delete dataCache['txd_staff'];
+                        clearCacheKey('txd_staff');
                         if (currentSection === 'staff') {
                             setTimeout(() => loadStaffControl(), 500);
                         }
@@ -2420,9 +2428,17 @@
         }
         
         async function getData(key, forceRefresh = false) {
-            // Se não forçar refresh e tem no cache, retorna imediatamente
+            // Verificar cache inteligente (com timestamp)
             if (!forceRefresh && dataCache[key] !== undefined) {
-                return dataCache[key];
+                const cacheTime = cacheTimestamps[key] || 0;
+                const now = Date.now();
+                const cacheAge = now - cacheTime;
+                
+                // Se o cache ainda é válido (menos de 30 segundos), retorna imediatamente
+                if (cacheAge < CACHE_TTL) {
+                    return dataCache[key];
+                }
+                // Cache expirado, mas ainda retorna enquanto busca novos dados (stale-while-revalidate)
             }
             
             // Verificar se Supabase está inicializado
@@ -2753,10 +2769,10 @@
                         break;
                 }
                 
-                // Atualizar cache
+                // Atualizar cache com timestamp
                 dataCache[key] = data;
+                cacheTimestamps[key] = Date.now();
                 console.log(`💾 Cache atualizado para '${key}':`, data.length, 'itens');
-                console.log(`💾 Cache['${key}'] =`, dataCache[key]);
                 return data;
                 
             } catch (error) {
@@ -2953,7 +2969,7 @@
                             }
                             
                             // Limpar cache para forçar refresh na próxima leitura
-                            delete dataCache['txd_areas'];
+                            clearCacheKey('txd_areas');
                             
                             console.log('Todas as áreas foram salvas. Cache limpo para forçar refresh.');
                         }
@@ -3112,7 +3128,7 @@
                                 }
                                 
                                 // Limpar cache após salvar
-                                delete dataCache['txd_registration_requests'];
+                                clearCacheKey('txd_registration_requests');
                             } catch (err) {
                                 // Se for erro de tabela não encontrada, tentar criar via insert direto
                                 if (err.code === 'PGRST116' || err.message?.includes('404')) {
@@ -3414,7 +3430,7 @@
                                 } else {
                                     console.log('✅ Staff criado a partir de solicitação aprovada:', savedStaffFromRequest);
                                     // Limpar cache
-                                    delete dataCache['txd_staff'];
+                                    clearCacheKey('txd_staff');
                                     
                                     // Criar objeto userFound para uso local
                                     userFound = {
@@ -3642,7 +3658,7 @@
                 }
                 
                 // Limpar cache para forçar refresh
-                delete dataCache['txd_registration_requests'];
+                clearCacheKey('txd_registration_requests');
                 
                 // Verificar se a solicitação foi realmente salva
                 await new Promise(resolve => setTimeout(resolve, 500));
@@ -4152,7 +4168,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         }
 
         async function loadDashboard() {
-            await refreshData();
+            // Carregar apenas dados necessários para o dashboard (usando cache)
+            await loadSectionData('inicio');
             
             // Obter nome do usuário
             const userName = currentUser?.name || currentUser?.displayName || 'Staff';
@@ -4828,7 +4845,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 request.role = selectedRole;
                 
                 // Limpar cache para forçar refresh
-                delete dataCache['txd_registration_requests'];
+                clearCacheKey('txd_registration_requests');
                 
                 // Criar usuário no staff diretamente no Supabase
                 console.log('👤 Criando novo membro do staff...');
@@ -4886,7 +4903,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 console.log('✅ Staff criado com sucesso:', savedStaff);
                 
                 // Limpar cache do staff
-                delete dataCache['txd_staff'];
+                clearCacheKey('txd_staff');
                 
                 // Notificar Discord
                 sendDiscordNotification('staff', '✅ Cadastro Aprovado', 
@@ -5018,7 +5035,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 request.rejectionReason = reason || 'Não especificado';
                 
                 // Limpar cache para forçar refresh
-                delete dataCache['txd_registration_requests'];
+                clearCacheKey('txd_registration_requests');
                 
                 // Notificar Discord
                 sendDiscordNotification('staff', '❌ Cadastro Rejeitado', 
@@ -8301,7 +8318,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         function clearCache() {
             if (confirm('Tem certeza que deseja limpar o cache local? Isso não afetará os dados no Supabase.')) {
                 localStorage.removeItem('txd_dataCache');
-                dataCache = {};
+                Object.keys(dataCache).forEach(key => delete dataCache[key]);
+                Object.keys(cacheTimestamps).forEach(key => delete cacheTimestamps[key]);
                 alert('Cache limpo com sucesso!');
                 logSystemAction('Cache limpo', 'Sistema', {});
             }
@@ -9901,7 +9919,7 @@ processDiscordCommand() diretamente.
                 }
                 
                 // Limpar cache para forçar reload
-                delete dataCache['txd_kanban'];
+                clearCacheKey('txd_kanban');
                 
                 // Remover visualmente o card com animação
                 const cardElement = document.querySelector(`[data-card-id="${cardId}"]`);
@@ -10099,23 +10117,23 @@ processDiscordCommand() diretamente.
         // Variável global para rastrear seção atual
         let currentSection = 'inicio';
         
-        // Carregar dados do localStorage ao iniciar
-        async function refreshData() {
+        // Carregar dados do localStorage ao iniciar (apenas na inicialização)
+        async function refreshData(forceRefresh = false) {
             try {
-                // Carregar todos os dados do Supabase (forçar refresh)
+                // Se não forçar refresh, usar cache quando disponível
                 const [staff, events, announcements, tickets, messages, groups, commands, favorites, usage, discord, requests, kanban] = await Promise.all([
-                    getData('txd_staff', true),
-                    getData('txd_events', true),
-                    getData('txd_announcements', true),
-                    getData('txd_tickets', true),
-                    getData('txd_chat_messages', true),
-                    getData('txd_chat_groups', true),
-                    getData('txd_commands', true),
-                    getData('txd_favorite_commands', true),
-                    getData('txd_command_usage', true),
-                    getData('txd_discord_config', true),
-                    getData('txd_registration_requests', true),
-                    getData('txd_kanban', true)
+                    getData('txd_staff', forceRefresh),
+                    getData('txd_events', forceRefresh),
+                    getData('txd_announcements', forceRefresh),
+                    getData('txd_tickets', forceRefresh),
+                    getData('txd_chat_messages', forceRefresh),
+                    getData('txd_chat_groups', forceRefresh),
+                    getData('txd_commands', forceRefresh),
+                    getData('txd_favorite_commands', forceRefresh),
+                    getData('txd_command_usage', forceRefresh),
+                    getData('txd_discord_config', forceRefresh),
+                    getData('txd_registration_requests', forceRefresh),
+                    getData('txd_kanban', forceRefresh)
                 ]);
                 
                 // Atualizar variáveis globais
@@ -10171,11 +10189,41 @@ processDiscordCommand() diretamente.
             }
         }
 
-        // Atualizar showSection para carregar conteúdo
+        // Mapeamento de dados necessários por seção (lazy loading)
+        const sectionDataMap = {
+            'inicio': ['txd_staff', 'txd_system_logs'],
+            'tarefas': ['txd_kanban', 'txd_staff'],
+            'ranking': ['txd_kanban', 'txd_tickets', 'txd_staff'],
+            'conquistas': ['txd_kanban', 'txd_tickets', 'txd_staff'],
+            'controle': ['txd_staff', 'txd_registration_requests'],
+            'comandos': ['txd_commands', 'txd_favorite_commands', 'txd_command_usage'],
+            'agenda': ['txd_events'],
+            'formularios': ['txd_tickets'],
+            'relatorios': ['txd_staff', 'txd_tickets', 'txd_events'],
+            'advertencias': ['txd_staff'],
+            'areas': ['txd_areas', 'txd_staff'],
+            'perfil': ['txd_staff'],
+            'config': ['txd_system_settings', 'txd_security_settings', 'txd_discord_config']
+        };
+        
+        // Função para carregar apenas dados necessários para uma seção
+        async function loadSectionData(section) {
+            const neededKeys = sectionDataMap[section] || [];
+            if (neededKeys.length === 0) return;
+            
+            // Carregar apenas os dados necessários (usando cache quando possível)
+            await Promise.all(neededKeys.map(key => getData(key, false)));
+        }
+        
+        // Atualizar showSection para carregar conteúdo de forma otimizada
         const originalShowSectionFunc = showSection;
-        showSection = function(section) {
+        showSection = async function(section) {
             if (originalShowSectionFunc) originalShowSectionFunc(section);
-            refreshData();
+            
+            // Carregar apenas dados necessários para esta seção (lazy loading)
+            await loadSectionData(section);
+            
+            // Carregar conteúdo da seção
             loadSectionContent(section);
         };
 
