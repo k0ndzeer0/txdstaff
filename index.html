@@ -3389,22 +3389,45 @@
                         if (approvedRequest) {
                             // Verificar senha
                             if (approvedRequest.password === password) {
-                                // Criar usuário a partir da solicitação aprovada
-                                userFound = {
-                                    id: Date.now(),
+                                // Criar usuário a partir da solicitação aprovada diretamente no Supabase
+                                const newStaffFromRequest = {
                                     name: approvedRequest.username,
-                                    displayName: approvedRequest.displayName,
+                                    display_name: approvedRequest.displayName || approvedRequest.username,
+                                    login: approvedRequest.username,
                                     role: approvedRequest.role || 'Helper', // Cargo padrão
                                     email: approvedRequest.email || null,
                                     status: 'Ativo',
                                     password: approvedRequest.password,
-                                    createdAt: new Date().toISOString()
+                                    area: approvedRequest.area || '',
+                                    game_id: approvedRequest.gameId || null,
+                                    discord_id: approvedRequest.discordId || null
                                 };
                                 
-                                // Adicionar ao staff
-                                const staffData = getData('txd_staff') || [];
-                                staffData.push(userFound);
-                                await saveData('txd_staff', staffData);
+                                // Salvar diretamente no Supabase
+                                const { data: savedStaffFromRequest, error: staffErrorFromRequest } = await supabaseClient
+                                    .from('staff')
+                                    .insert(newStaffFromRequest)
+                                    .select();
+                                
+                                if (staffErrorFromRequest) {
+                                    console.error('❌ Erro ao criar staff a partir de solicitação aprovada:', staffErrorFromRequest);
+                                } else {
+                                    console.log('✅ Staff criado a partir de solicitação aprovada:', savedStaffFromRequest);
+                                    // Limpar cache
+                                    delete dataCache['txd_staff'];
+                                    
+                                    // Criar objeto userFound para uso local
+                                    userFound = {
+                                        id: savedStaffFromRequest[0]?.id || Date.now(),
+                                        name: approvedRequest.username,
+                                        displayName: approvedRequest.displayName || approvedRequest.username,
+                                        role: approvedRequest.role || 'Helper',
+                                        email: approvedRequest.email || null,
+                                        status: 'Ativo',
+                                        password: approvedRequest.password,
+                                        createdAt: new Date().toISOString()
+                                    };
+                                }
                                 
                                 // Marcar solicitação como processada
                                 approvedRequest.status = 'processed';
@@ -4807,26 +4830,63 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 // Limpar cache para forçar refresh
                 delete dataCache['txd_registration_requests'];
                 
-                // Criar usuário no staff
+                // Criar usuário no staff diretamente no Supabase
+                console.log('👤 Criando novo membro do staff...');
+                
+                // Verificar se já existe um staff com o mesmo login
+                const { data: existingStaff, error: checkError } = await supabaseClient
+                    .from('staff')
+                    .select('id, login, name')
+                    .eq('login', request.username)
+                    .single();
+                
+                if (!checkError && existingStaff) {
+                    console.warn('⚠️ Staff já existe com este login:', existingStaff);
+                    alert(`⚠️ Este usuário já está cadastrado no sistema.\n\nLogin: ${request.username}\nNome: ${existingStaff.name || existingStaff.display_name}`);
+                    return;
+                }
+                
                 const newStaff = {
-                    id: Date.now(),
                     name: request.displayName || request.username,
-                    displayName: request.displayName || request.username,
+                    display_name: request.displayName || request.username,
                     login: request.username, // Login é o username
                     role: selectedRole,
                     email: request.email || null,
                     status: 'Ativo',
                     password: request.password, // Em produção, deve ser criptografado
                     area: request.area || '',
-                    gameId: request.gameId || null,
-                    discordId: request.discordId || null,
-                    createdAt: new Date().toISOString(),
-                    approvedBy: currentUser.name || currentUser.displayName
+                    game_id: request.gameId || null,
+                    discord_id: request.discordId || null,
+                    approved_by: currentUser.name || currentUser.displayName
                 };
                 
-                const staffData = getData('txd_staff') || [];
-                staffData.push(newStaff);
-                await saveData('txd_staff', staffData);
+                console.log('📝 Dados do novo staff:', newStaff);
+                
+                // Salvar diretamente no Supabase (sem ID, deixar o banco gerar)
+                const { data: savedStaff, error: staffError } = await supabaseClient
+                    .from('staff')
+                    .insert(newStaff)
+                    .select();
+                
+                if (staffError) {
+                    console.error('❌ Erro ao criar staff no Supabase:', staffError);
+                    console.error('📊 Detalhes:', {
+                        code: staffError.code,
+                        message: staffError.message,
+                        details: staffError.details,
+                        hint: staffError.hint
+                    });
+                    throw new Error(`Erro ao criar membro do staff: ${staffError.message || 'Erro desconhecido'}`);
+                }
+                
+                if (!savedStaff || savedStaff.length === 0) {
+                    throw new Error('Staff não foi criado. Nenhum dado retornado.');
+                }
+                
+                console.log('✅ Staff criado com sucesso:', savedStaff);
+                
+                // Limpar cache do staff
+                delete dataCache['txd_staff'];
                 
                 // Notificar Discord
                 sendDiscordNotification('staff', '✅ Cadastro Aprovado', 
@@ -4852,8 +4912,15 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 loadStaffControl();
                 
             } catch (error) {
-                console.error('Erro ao aprovar cadastro:', error);
-                alert('Erro ao aprovar cadastro. Tente novamente.');
+                console.error('❌ Erro ao aprovar cadastro:', error);
+                console.error('📊 Detalhes do erro:', {
+                    message: error.message,
+                    code: error.code,
+                    details: error.details,
+                    hint: error.hint,
+                    stack: error.stack
+                });
+                alert(`❌ Erro ao aprovar cadastro:\n\n${error.message || 'Erro desconhecido'}\n\nVerifique o console (F12) para mais detalhes.`);
             }
         }
         
