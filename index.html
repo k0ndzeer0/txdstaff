@@ -389,10 +389,11 @@
         }
 
         .navbar {
-            background: rgba(26, 27, 29, 0.9);
+            background: rgba(26, 27, 29, 0.95);
             backdrop-filter: blur(20px);
             border-bottom: 1px solid var(--gray-border);
-            padding: 10px 20px;
+            height: 80px;
+            padding: 0 32px;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -400,12 +401,11 @@
             position: sticky;
             top: 0;
             z-index: 100;
-            min-height: 70px;
-            gap: 16px;
+            gap: 24px;
         }
 
         .navbar-logo {
-            height: 60px !important;
+            height: 44px !important;
             width: auto !important;
             display: block;
             object-fit: contain;
@@ -414,7 +414,8 @@
 
         .nav-menu {
             display: flex;
-            gap: 8px;
+            align-items: center;
+            gap: 6px;
             list-style: none;
             flex-wrap: nowrap;
             overflow-x: auto;
@@ -422,6 +423,9 @@
             white-space: nowrap;
             flex: 1;
             min-width: 0;
+            margin: 0;
+            padding: 0;
+            height: 100%;
         }
 
         .navbar .btn {
@@ -430,10 +434,18 @@
 
         .nav-menu::-webkit-scrollbar {
             height: 6px;
+            display: none;
         }
 
         .nav-menu::-webkit-scrollbar-track {
             background: transparent;
+        }
+
+        .nav-menu li {
+            display: flex;
+            align-items: center;
+            position: relative;
+            height: 100%;
         }
 
         .nav-menu::-webkit-scrollbar-thumb {
@@ -445,10 +457,17 @@
             color: var(--gray-light);
             text-decoration: none;
             font-weight: 500;
-            padding: 10px 16px;
+            padding: 0 16px;
+            height: 40px;
             border-radius: 8px;
             transition: all 0.3s ease;
             font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            white-space: nowrap;
+            line-height: 1;
         }
 
         .nav-menu li a:hover {
@@ -464,6 +483,17 @@
 
         .nav-menu > li {
             position: relative;
+        }
+
+        .navbar .btn {
+            margin: 0;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            flex-shrink: 0;
+            width: auto;
         }
 
         .dev-menu-trigger {
@@ -1927,7 +1957,7 @@
     <!-- Dashboard -->
     <div id="dashboard" class="dashboard">
         <nav class="navbar">
-            <img src="https://tdatgzjwcuatpqhfococ.supabase.co/storage/v1/object/public/logos/sem-fundo-txd.png" alt="TXD Staff" class="navbar-logo" style="height: 60px !important; width: auto !important;">
+            <img src="https://tdatgzjwcuatpqhfococ.supabase.co/storage/v1/object/public/logos/sem-fundo-txd.png" alt="TXD Staff" class="navbar-logo">
             <ul class="nav-menu">
                 <li><a href="#" onclick="showSection('inicio'); return false;" class="active">Início</a></li>
                 <li><a href="#" onclick="showSection('pendencias'); return false;">📋 Pendências</a></li>
@@ -1943,7 +1973,7 @@
                 <li><a href="#" onclick="showSection('agenda'); return false;">Agenda</a></li>
                 <li><a href="#" onclick="showSection('relatorios'); return false;">Relatórios</a></li>
             </ul>
-            <button class="btn btn-secondary" onclick="logout()" style="width: auto; padding: 10px 20px;">
+            <button class="btn btn-secondary" onclick="logout()">
                 <i class="fas fa-sign-out-alt"></i> Sair
             </button>
         </nav>
@@ -2381,6 +2411,17 @@
                         Se selecionar "Desenvolvimento", você poderá escolher o tipo técnico. Doações são financeiras (somente C-Level).
                     </small>
                 </div>
+                <div class="input-group">
+                    <label>Destino *</label>
+                    <select id="pendencyDestination" required onchange="handlePendencyDestinationChange()">
+                        <option value="geral">Geral</option>
+                        <option value="dev">DEV</option>
+                        <option value="clevel">C-Level</option>
+                    </select>
+                    <small style="color: var(--gray-text); font-size: 12px; margin-top: 4px; display: block;">
+                        Define quem deve tratar esta pendência. Doações devem ir para C-Level.
+                    </small>
+                </div>
                 <div class="input-group hidden" id="pendencyDevTypeGroup">
                     <label>Tipo de Desenvolvimento *</label>
                     <select id="pendencyDevType">
@@ -2592,6 +2633,218 @@
         
         // Subscriptions de real-time
         let realtimeSubscriptions = [];
+        const realtimeChannelsByName = new Map();
+
+        // State único em memória (fonte de verdade para renderização)
+        const state = {
+            kanban: {
+                initialized: false,
+                columnsById: new Map(),
+                cardsById: new Map(),
+                assigneesByCardId: new Map()
+            },
+            pendencies: {
+                initialized: false,
+                byId: new Map()
+            }
+        };
+
+        // Locks simples para idempotência (double-click, múltiplos submits)
+        const inflightOps = new Set();
+
+        function upsertItem(map, item) {
+            if (!map || !item) return;
+            const id = item.id;
+            if (id === undefined || id === null || id === '') return;
+            const key = String(id);
+            const existing = map.get(key);
+            map.set(key, existing ? { ...existing, ...item } : item);
+        }
+
+        function removeItem(map, id) {
+            if (!map) return;
+            if (id === undefined || id === null || id === '') return;
+            map.delete(String(id));
+        }
+
+        function withIdempotency(opKey, fn) {
+            const key = String(opKey || '');
+            if (!key) return fn();
+            if (inflightOps.has(key)) {
+                console.warn('[idempotency] Operação ignorada (já em andamento):', key);
+                return;
+            }
+            inflightOps.add(key);
+            const finalize = () => inflightOps.delete(key);
+            try {
+                const result = fn();
+                if (result && typeof result.then === 'function') {
+                    return result.finally(finalize);
+                }
+                finalize();
+                return result;
+            } catch (err) {
+                finalize();
+                throw err;
+            }
+        }
+
+        function subscribeRealtimeOnce(name, createChannelFn) {
+            if (!supabaseClient) return null;
+            const channelName = String(name || '').trim();
+            if (!channelName) return null;
+            if (realtimeChannelsByName.has(channelName)) {
+                return realtimeChannelsByName.get(channelName);
+            }
+            const channel = createChannelFn();
+            if (!channel) return null;
+            realtimeChannelsByName.set(channelName, channel);
+            realtimeSubscriptions.push(channel);
+            return channel;
+        }
+
+        function resetRealtimeSubscriptions() {
+            realtimeSubscriptions.forEach(sub => {
+                try {
+                    supabaseClient.removeChannel(sub);
+                } catch (e) {
+                    console.warn('Erro ao remover subscription:', e);
+                }
+            });
+            realtimeSubscriptions = [];
+            realtimeChannelsByName.clear();
+        }
+
+        function normalizePendencyRow(row) {
+            const p = toCamelCase(row || {});
+            // Derivar destino/area de forma compatível (coluna `area` OU metadata em attachments)
+            const meta = p.attachments && typeof p.attachments === 'object' ? (p.attachments._meta || p.attachments.meta || null) : null;
+            const area = (p.area || p.destination || meta?.destination || '').toString().toLowerCase().trim();
+            const assignedRole = (p.assignedRole || p.assigned_role || meta?.assignedRole || '').toString().toLowerCase().trim();
+            const assignedUserId = p.assignedUserId || p.assigned_user_id || meta?.assignedUserId || null;
+            return {
+                ...p,
+                area: area || null,
+                assignedRole: assignedRole || null,
+                assignedUserId: assignedUserId || null
+            };
+        }
+
+        function inferPendencyAreaFromType(type) {
+            const scope = getPendencyScope(type);
+            if (scope === 'financial') return 'clevel';
+            if (scope === 'dev') return 'dev';
+            return 'geral';
+        }
+
+        function getEffectivePendencyArea(pendency) {
+            const explicit = (pendency?.area || '').toString().toLowerCase().trim();
+            if (explicit) return explicit;
+            const meta = pendency?.attachments && typeof pendency.attachments === 'object'
+                ? (pendency.attachments._meta || pendency.attachments.meta || null)
+                : null;
+            const metaDest = (meta?.destination || '').toString().toLowerCase().trim();
+            if (metaDest) return metaDest;
+            return inferPendencyAreaFromType(pendency?.type);
+        }
+
+        async function ensurePendenciesLoaded(force = false) {
+            if (state.pendencies.initialized && !force) return;
+            if (!supabaseClient) {
+                console.warn('[pendencies] Supabase indisponível; não foi possível carregar.');
+                state.pendencies.initialized = true;
+                return;
+            }
+            try {
+                const { data, error } = await supabaseClient
+                    .from('pendencies')
+                    .select('*')
+                    .order('created_at', { ascending: false });
+                if (error) {
+                    console.error('[pendencies] Erro ao carregar:', error);
+                    throw error;
+                }
+                state.pendencies.byId.clear();
+                (data || []).forEach(row => {
+                    const normalized = normalizePendencyRow(row);
+                    upsertItem(state.pendencies.byId, normalized);
+                });
+                state.pendencies.initialized = true;
+                console.log('[pendencies] State inicializado:', state.pendencies.byId.size);
+            } catch (err) {
+                console.error('[pendencies] Falha ao inicializar state:', err);
+                state.pendencies.initialized = true;
+            }
+        }
+
+        async function ensureKanbanLoaded(force = false) {
+            if (state.kanban.initialized && !force) return;
+            try {
+                const kanbanData = await getKanbanData();
+                state.kanban.columnsById.clear();
+                state.kanban.cardsById.clear();
+                state.kanban.assigneesByCardId.clear();
+
+                const columns = Array.isArray(kanbanData?.columns) ? kanbanData.columns : [];
+                const cards = Array.isArray(kanbanData?.cards) ? kanbanData.cards : [];
+
+                columns.forEach(col => {
+                    if (!col || col.id === undefined || col.id === null) return;
+                    upsertItem(state.kanban.columnsById, { ...col, id: String(col.id) });
+                });
+
+                cards.forEach(card => {
+                    if (!card || card.id === undefined || card.id === null) return;
+                    const normalizedCard = {
+                        ...card,
+                        id: Number(card.id),
+                        columnId: card.columnId || card.column_id || 'todo',
+                        assignees: Array.isArray(card.assignees) ? card.assignees : (card.assignee ? [card.assignee] : [])
+                    };
+                    upsertItem(state.kanban.cardsById, normalizedCard);
+                    state.kanban.assigneesByCardId.set(String(normalizedCard.id), normalizedCard.assignees || []);
+                });
+
+                state.kanban.initialized = true;
+                console.log('[kanban] State inicializado:', {
+                    columns: state.kanban.columnsById.size,
+                    cards: state.kanban.cardsById.size
+                });
+            } catch (err) {
+                console.error('[kanban] Falha ao inicializar state:', err);
+                state.kanban.initialized = true;
+            }
+        }
+
+        function getKanbanSnapshotFromState() {
+            const columns = Array.from(state.kanban.columnsById.values())
+                .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+            const cards = Array.from(state.kanban.cardsById.values())
+                .sort((a, b) => {
+                    const aTime = new Date(a.createdAt || a.created_at || 0).getTime();
+                    const bTime = new Date(b.createdAt || b.created_at || 0).getTime();
+                    return bTime - aTime;
+                })
+                .map(card => {
+                    const assignees = state.kanban.assigneesByCardId.get(String(card.id));
+                    return {
+                        ...card,
+                        assignees: Array.isArray(assignees) ? assignees : (Array.isArray(card.assignees) ? card.assignees : [])
+                    };
+                });
+            return { columns, cards };
+        }
+
+        // Renderizações derivadas do state (sem duplicar)
+        function renderPendencias() {
+            if (currentSection !== 'pendencias' && currentSection !== 'formularios') return;
+            loadPendencies().catch(err => console.error('[pendencies] Erro ao renderizar:', err));
+        }
+
+        function renderTarefas() {
+            if (currentSection !== 'tarefas') return;
+            loadKanban().catch(err => console.error('[kanban] Erro ao renderizar:', err));
+        }
         
         // Função para inicializar real-time
         function initializeRealtime() {
@@ -2601,17 +2854,10 @@
             }
             
             // Limpar subscriptions antigas
-            realtimeSubscriptions.forEach(sub => {
-                try {
-                    supabaseClient.removeChannel(sub);
-                } catch (e) {
-                    console.warn('Erro ao remover subscription:', e);
-                }
-            });
-            realtimeSubscriptions = [];
+            resetRealtimeSubscriptions();
             
             // Subscription para registration_requests
-            const regChannel = supabaseClient
+            subscribeRealtimeOnce('registration_requests_changes', () => supabaseClient
                 .channel('registration_requests_changes')
                 .on('postgres_changes', 
                     { event: '*', schema: 'public', table: 'registration_requests' },
@@ -2625,8 +2871,31 @@
                         }
                     }
                 )
-                .subscribe();
-            realtimeSubscriptions.push(regChannel);
+                .subscribe());
+
+            // Subscription para pendencies (CRUD em tempo real, sem recarregar página)
+            subscribeRealtimeOnce('pendencies_changes', () => supabaseClient
+                .channel('pendencies_changes')
+                .on('postgres_changes',
+                    { event: '*', schema: 'public', table: 'pendencies' },
+                    (payload) => {
+                        try {
+                            console.log('[pendencies][realtime]', payload);
+                            clearCacheKey('txd_pendencies');
+                            if (payload.eventType === 'DELETE') {
+                                const id = payload.old?.id;
+                                removeItem(state.pendencies.byId, id);
+                            } else {
+                                const normalized = normalizePendencyRow(payload.new);
+                                upsertItem(state.pendencies.byId, normalized);
+                            }
+                            renderPendencias();
+                        } catch (err) {
+                            console.error('[pendencies][realtime] erro:', err, payload);
+                        }
+                    }
+                )
+                .subscribe());
             
             // Subscription para kanban (com debounce para evitar loops)
             let kanbanReloadTimeout = null;
@@ -2668,63 +2937,95 @@
                 }, 600);
             };
             
-            const kanbanCardsChannel = supabaseClient
+            subscribeRealtimeOnce('kanban_cards_changes', () => supabaseClient
                 .channel('kanban_cards_changes')
                 .on('postgres_changes',
                     { event: '*', schema: 'public', table: 'kanban_cards' },
                     (payload) => {
-                        // Ignorar eventos DELETE (payload.old existe mas payload.new não)
-                        // DELETE: tem payload.old mas não tem payload.new
-                        // UPDATE: tem payload.old e payload.new
-                        // INSERT: tem payload.new mas não tem payload.old
-                        if (payload.old && !payload.new) {
-                            console.log('Evento DELETE ignorado (já processado localmente)');
-                            return;
-                        }
-                        
-                        // Ignorar mudanças feitas pelo próprio usuário atual (evitar loop)
-                        if (payload.new && payload.new.updated_at) {
-                            const now = new Date();
-                            const updatedAt = new Date(payload.new.updated_at);
-                            const diff = now - updatedAt;
-                            // Se a mudança foi feita há menos de 3 segundos, pode ser do próprio usuário
-                            if (diff < 3000) {
-                                console.log('Mudança recente em kanban_cards (possivelmente do próprio usuário), ignorando...');
-                                return;
+                        try {
+                            console.log('[kanban_cards][realtime]', payload);
+                            clearCacheKey('txd_kanban');
+                            if (payload.eventType === 'DELETE') {
+                                const id = payload.old?.id;
+                                removeItem(state.kanban.cardsById, id);
+                                state.kanban.assigneesByCardId.delete(String(id));
+                            } else {
+                                const card = toCamelCase(payload.new || {});
+                                const normalized = {
+                                    ...card,
+                                    id: Number(card.id),
+                                    columnId: card.columnId || 'todo'
+                                };
+                                upsertItem(state.kanban.cardsById, normalized);
                             }
+                            renderTarefas();
+                        } catch (err) {
+                            console.error('[kanban_cards][realtime] erro:', err, payload);
+                            reloadKanbanDebounced();
                         }
-                        console.log('Mudança em kanban_cards:', payload);
-                        clearCacheKey('txd_kanban');
-                        reloadKanbanDebounced();
                     }
                 )
-                .subscribe();
-            realtimeSubscriptions.push(kanbanCardsChannel);
+                .subscribe());
             
-            const kanbanColumnsChannel = supabaseClient
+            subscribeRealtimeOnce('kanban_columns_changes', () => supabaseClient
                 .channel('kanban_columns_changes')
                 .on('postgres_changes',
                     { event: '*', schema: 'public', table: 'kanban_columns' },
                     (payload) => {
-                        console.log('Mudança em kanban_columns:', payload);
-                        clearCacheKey('txd_kanban');
-                        reloadKanbanDebounced();
+                        try {
+                            console.log('[kanban_columns][realtime]', payload);
+                            clearCacheKey('txd_kanban');
+                            if (payload.eventType === 'DELETE') {
+                                removeItem(state.kanban.columnsById, payload.old?.id);
+                            } else {
+                                const col = toCamelCase(payload.new || {});
+                                upsertItem(state.kanban.columnsById, { ...col, id: String(col.id) });
+                            }
+                            renderTarefas();
+                        } catch (err) {
+                            console.error('[kanban_columns][realtime] erro:', err, payload);
+                            reloadKanbanDebounced();
+                        }
                     }
                 )
-                .subscribe();
-            realtimeSubscriptions.push(kanbanColumnsChannel);
+                .subscribe());
 
-            const kanbanAssigneesChannel = supabaseClient
+            subscribeRealtimeOnce('kanban_assignees_changes', () => supabaseClient
                 .channel('kanban_assignees_changes')
                 .on('postgres_changes',
                     { event: '*', schema: 'public', table: 'kanban_card_assignees' },
-                    () => {
-                        clearCacheKey('txd_kanban');
-                        reloadKanbanDebounced();
+                    (payload) => {
+                        try {
+                            clearCacheKey('txd_kanban');
+                            if (payload.eventType === 'DELETE') {
+                                const cardId = payload.old?.card_id ?? payload.old?.cardId;
+                                if (!cardId) return;
+                                const existing = state.kanban.assigneesByCardId.get(String(cardId)) || [];
+                                const name = payload.old?.assignee_name || payload.old?.assigneeName;
+                                if (name) {
+                                    state.kanban.assigneesByCardId.set(
+                                        String(cardId),
+                                        existing.filter(a => String(a).toLowerCase().trim() !== String(name).toLowerCase().trim())
+                                    );
+                                }
+                            } else {
+                                const row = toCamelCase(payload.new || {});
+                                const cardId = row.cardId ?? row.card_id;
+                                const name = row.assigneeName ?? row.assignee_name;
+                                if (!cardId) return;
+                                const existing = state.kanban.assigneesByCardId.get(String(cardId)) || [];
+                                if (name && !existing.some(a => String(a).toLowerCase().trim() === String(name).toLowerCase().trim())) {
+                                    state.kanban.assigneesByCardId.set(String(cardId), [...existing, name]);
+                                }
+                            }
+                            renderTarefas();
+                        } catch (err) {
+                            console.error('[kanban_assignees][realtime] erro:', err, payload);
+                            reloadKanbanDebounced();
+                        }
                     }
                 )
-                .subscribe();
-            realtimeSubscriptions.push(kanbanAssigneesChannel);
+                .subscribe());
             
             // Subscription para staff
             const staffChannel = supabaseClient
@@ -4499,9 +4800,15 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             return ['owner', 'ceo', 'coo', 'cmo', 'cco', 'cio', 'c_level'].includes(normalized);
         }
 
-        function isFinancialPendencyType(type) {
+        function getPendencyScope(type) {
             const normalized = (type || '').toString().toLowerCase();
-            return ['doacoes', 'roupas', 'carros', 'itens'].includes(normalized);
+            if (['doacoes'].includes(normalized)) return 'financial';
+            if (['bugs', 'mapas', 'carros', 'roupas', 'itens', 'coordenadas', 'logs', 'atualizacoes', 'desenvolvimento'].includes(normalized)) return 'dev';
+            return 'general';
+        }
+
+        function isFinancialPendencyType(type) {
+            return getPendencyScope(type) === 'financial';
         }
 
         /**
@@ -5037,8 +5344,9 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         }
 
         async function loadKanban() {
-            // Usar cache primeiro (muito mais rápido)
-            let kanbanData = await getKanbanData();
+            // Renderizar a partir do state único (evita duplicação e permite realtime sem reload)
+            await ensureKanbanLoaded(false);
+            let kanbanData = getKanbanSnapshotFromState();
             
             // Validações robustas para garantir que os dados estão corretos
             if (!kanbanData) {
@@ -5073,6 +5381,9 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 ];
                 // Salvar colunas padrão apenas uma vez (sem recarregar)
                 await saveData('txd_kanban', kanbanData);
+                // Re-sincronizar state após criar colunas padrão
+                await ensureKanbanLoaded(true);
+                kanbanData = getKanbanSnapshotFromState();
             }
             
             // NÃO chamar saveKanbanData() aqui para evitar loop infinito com real-time
@@ -6849,11 +7160,12 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             await loadSectionData('relatorios');
             
             // Calcular estatísticas gerais
-            const kanbanData = await getKanbanData();
+            await ensureKanbanLoaded(false);
+            const kanbanData = getKanbanSnapshotFromState();
             const totalTasks = (kanbanData?.cards || []).length;
             const completedTasks = (kanbanData?.cards || []).filter(c => c && (c.columnId === 'done' || c.column_id === 'done')).length;
-            const pendenciasRaw = await getData('txd_pendencies', false);
-            const pendencias = Array.isArray(pendenciasRaw) ? pendenciasRaw : [];
+            await ensurePendenciesLoaded(false);
+            const pendencias = Array.from(state.pendencies.byId.values());
             const resolvedPendencias = pendencias.filter(p => ['completed', 'concluida', 'concluída'].includes((p.status || '').toLowerCase())).length;
             const events = Array.isArray(eventsData) ? eventsData : [];
             const activeStaff = Array.isArray(staffData) ? staffData.filter(s => s.status === 'Ativo') : [];
@@ -7637,29 +7949,54 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         
         async function loadPendencies() {
             await loadSectionData('pendencias');
-            const pendenciesRaw = await getData('txd_pendencies', false);
-            const pendencies = Array.isArray(pendenciesRaw) ? pendenciesRaw : [];
+            await ensurePendenciesLoaded(false);
+            const pendencies = Array.from(state.pendencies.byId.values());
             const isCLevel = isCLevelRole(currentUser?.role);
+            const isDev = isDevRole(currentUser?.role);
             const canViewAll = hasPermission('pendency.view_all') || hasPermission('dashboard') || isCLevel;
 
-            const myPendencies = pendencies.filter(p =>
-                String(p.userId || p.user_id) === String(currentUser.id) ||
-                (p.userName || p.user_name) === (currentUser.name || currentUser.displayName)
-            );
+            const currentUserId = String(currentUser?.id ?? '');
+            const currentUserName = (currentUser?.name || currentUser?.displayName || '').toString();
+
+            const isMinePendency = (p) => {
+                const userId = String(p?.userId ?? p?.user_id ?? '');
+                const userName = (p?.userName || p?.user_name || '').toString();
+                return (currentUserId && userId && userId === currentUserId) || (currentUserName && userName && userName === currentUserName);
+            };
+
+            const myPendencies = pendencies.filter(isMinePendency);
 
             const visiblePendencies = pendencies.filter(p => {
-                const financialOnly = isFinancialPendencyType(p.type);
-                if (financialOnly) {
-                    if (isCLevel) return true;
-                    return myPendencies.some(my => String(my.id) === String(p.id));
+                if (isMinePendency(p)) return true;
+                if (isCLevel) return true; // Owner/CEO/C-Level vê tudo
+                if (canViewAll) return true;
+
+                const area = getEffectivePendencyArea(p);
+                const assignedRole = (p?.assignedRole || p?.assigned_role || '').toString().toLowerCase().trim();
+                const assignedUserId = String(p?.assignedUserId ?? p?.assigned_user_id ?? '');
+
+                if (area === 'geral') return true;
+                if (area === 'clevel') return false;
+                if (area === 'dev') {
+                    return isDev || assignedRole === 'dev' || (assignedUserId && assignedUserId === currentUserId);
                 }
-                return canViewAll || myPendencies.some(my => String(my.id) === String(p.id));
+
+                // Fallback antigo baseado em type (compatibilidade)
+                const scope = getPendencyScope(p?.type);
+                if (scope === 'financial') return false;
+                if (scope === 'dev') return isDev;
+                return false;
             });
 
-            const canApproveBase = hasPermission('pendency.approve') || hasPermission('dashboard') || isCLevel;
+            const canApproveBase = hasPermission('pendency.approve') || hasPermission('dashboard') || isCLevel || isDev;
             const canApprovePendency = (pendency) => {
                 if (!canApproveBase) return false;
                 if (isFinancialPendencyType(pendency?.type)) return isCLevel;
+                if (getPendencyScope(pendency?.type) === 'financial') return isCLevel;
+
+                const area = getEffectivePendencyArea(pendency);
+                if (area === 'clevel' && !isCLevel) return false;
+                if (area === 'dev' && !(isDev || isCLevel)) return false;
                 return true;
             };
 
@@ -7874,6 +8211,9 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             };
             const typeLabel = typeLabels[pendency.type] || pendency.type || 'Bugs';
             const financialOnly = isFinancialPendencyType(pendency.type);
+            const scope = getPendencyScope(pendency.type); // compatibilidade
+            const area = getEffectivePendencyArea(pendency);
+            const isDevDestination = area === 'dev';
             const statusLabels = {
                 'pending': 'Pendente',
                 'Pendente': 'Pendente',
@@ -7912,6 +8252,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                                 <span class="badge" style="background: ${priorityInfo.bg}; color: ${priorityInfo.text}; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;">${priorityInfo.label}</span>
                                 <span class="badge" style="background: ${statusColor}; color: white; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;">${statusLabel}</span>
                                 ${financialOnly ? '<span class="badge" style="background: var(--danger); color: white; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;">Somente C-Level</span>' : ''}
+                                ${isDevDestination ? '<span class="badge" style="background: var(--primary); color: white; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;">DEV</span>' : ''}
                                 ${isOverdue ? '<span class="badge badge-danger">Vencida</span>' : ''}
                             </div>
                             <div style="display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--gray-light);">
@@ -8469,8 +8810,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             const activeWarnings = userWarnings.filter(w => w.status === 'active' || !w.status);
             
             // Buscar pendências do usuário
-            const pendenciesRaw = await getData('txd_pendencies', false);
-            const pendencies = Array.isArray(pendenciesRaw) ? pendenciesRaw : [];
+            await ensurePendenciesLoaded(false);
+            const pendencies = Array.from(state.pendencies.byId.values());
             const myPendencies = pendencies.filter(p => 
                 String(p.userId || p.user_id) === String(currentUser.id) ||
                 (p.userName || p.user_name) === (currentUser.name || currentUser.displayName)
@@ -8481,8 +8822,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             score = (tasksCompleted * 10) + (myResolvedPendencies.length * 15) + (messagesCount * 2);
             
             // Buscar tarefas do usuário
-            const kanbanDataRaw = await getData('txd_kanban', false);
-            const kanbanData = kanbanDataRaw || { columns: [], cards: [] };
+            await ensureKanbanLoaded(false);
+            const kanbanData = getKanbanSnapshotFromState();
             const allCards = kanbanData?.cards || [];
             const myTasks = allCards.filter(card => {
                 if (!card) return false;
@@ -12163,20 +12504,24 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 return { success: false, message: `Coluna inválida. Use: ${validColumns.join(', ')}` };
             }
             
-            let kanbanData = getKanbanData();
-            const card = kanbanData.cards.find(c => c.id === taskId);
+            if (!state.kanban.initialized) {
+                ensureKanbanLoaded(true).catch(err => console.error('[kanban] Falha ao inicializar via comando:', err));
+                return { success: false, message: 'Kanban ainda não carregado. Abra a seção Tarefas e tente novamente em alguns segundos.' };
+            }
+
+            const card = state.kanban.cardsById.get(String(taskId));
             
             if (!card) {
                 return { success: false, message: `Tarefa com ID ${taskId} não encontrada` };
             }
-            
-            card.columnId = newColumn;
-            card.updatedAt = new Date().toISOString();
-            saveKanbanData(kanbanData);
-            
-            if (document.getElementById('sectionTitle')?.textContent.includes('Tarefas')) {
-                loadKanban();
-            }
+
+            updateKanbanCardColumn(taskId, newColumn)
+                .then(() => {
+                    if (document.getElementById('sectionTitle')?.textContent.includes('Tarefas')) {
+                        renderTarefas();
+                    }
+                })
+                .catch(err => console.error('[kanban] Erro ao mover tarefa via comando !status:', err));
             
             addDiscordCommandLog('!status', `Tarefa ${taskId} movida para ${newColumn}`, true);
             
@@ -12334,6 +12679,12 @@ processDiscordCommand() diretamente.
         }
 
         // ========== FUNÇÕES DE PENDÊNCIAS ==========
+        let pendencyDestinationTouched = false;
+
+        function handlePendencyDestinationChange() {
+            pendencyDestinationTouched = true;
+        }
+
         function handlePendencyTypeChange() {
             const type = document.getElementById('pendencyType')?.value || '';
             const devGroup = document.getElementById('pendencyDevTypeGroup');
@@ -12342,6 +12693,7 @@ processDiscordCommand() diretamente.
             const donationSelect = document.getElementById('pendencyDonationItem');
             const donationOtherGroup = document.getElementById('pendencyDonationItemOtherGroup');
             const donationOtherInput = document.getElementById('pendencyDonationItemOther');
+            const destinationSelect = document.getElementById('pendencyDestination');
 
             if (!devGroup || !devSelect || !donationGroup || !donationSelect || !donationOtherGroup || !donationOtherInput) return;
 
@@ -12361,6 +12713,13 @@ processDiscordCommand() diretamente.
             } else if (type === 'doacoes') {
                 donationGroup.classList.remove('hidden');
                 donationSelect.required = true;
+            }
+
+            // Destino padrão baseado no tipo (sem sobrescrever escolha manual)
+            if (destinationSelect && !pendencyDestinationTouched) {
+                if (type === 'desenvolvimento') destinationSelect.value = 'dev';
+                else if (type === 'doacoes') destinationSelect.value = 'clevel';
+                else destinationSelect.value = 'geral';
             }
         }
 
@@ -12384,6 +12743,7 @@ processDiscordCommand() diretamente.
             document.getElementById('pendencyId').value = '';
             document.getElementById('pendencyModalTitle').textContent = 'Nova Solicitação de Pendência';
             document.getElementById('pendencyForm').reset();
+            pendencyDestinationTouched = false;
             const today = new Date().toISOString().split('T')[0];
             document.getElementById('pendencyDueDate').setAttribute('min', today);
             handlePendencyTypeChange();
@@ -12446,56 +12806,142 @@ processDiscordCommand() diretamente.
                 displayType = `Doações (${donationLabel})`;
                 finalDescription = `[Item de doação: ${donationLabel}]\n${description}`;
             }
-            try {
-                const existingPendencies = await getData('txd_pendencies', false);
-                const pendenciesArray = Array.isArray(existingPendencies) ? existingPendencies : [];
-                const pendencyData = {
-                    id: pendencyId || Date.now(),
-                    userId: currentUser.id,
-                    userName: currentUser.displayName || currentUser.name || 'Usuário',
-                    title: title,
-                    description: finalDescription,
-                    type: type,
-                    priority: priority,
-                    status: 'pending',
-                    dueDate: dueDate || null,
-                    createdAt: pendencyId ? (pendenciesArray.find(p => p.id == pendencyId)?.createdAt || pendenciesArray.find(p => p.id == pendencyId)?.created_at || new Date().toISOString()) : new Date().toISOString(),
-                    updatedAt: new Date().toISOString(),
-                    createdBy: currentUser.id
-                };
-                if (pendencyId) {
-                    const index = pendenciesArray.findIndex(p => p.id == pendencyId);
-                    if (index >= 0) {
-                        pendenciesArray[index] = { ...pendenciesArray[index], ...pendencyData };
-                    }
-                } else {
-                    pendenciesArray.push(pendencyData);
-                }
-                await saveData('txd_pendencies', pendenciesArray);
-                clearCacheKey('txd_pendencies');
-                sendDiscordNotification('staff', '📋 Nova Pendência Solicitada', `Nova pendência #${pendencyData.id} foi criada`, [
-                    { name: '📋 Título', value: title, inline: false },
-                    { name: '👤 Solicitado por', value: pendencyData.userName, inline: true },
-                    { name: '📊 Prioridade', value: priority === 'urgent' ? 'Urgente' : priority === 'high' ? 'Alta' : priority === 'medium' ? 'Média' : 'Baixa', inline: true },
-                    { name: '🏷️ Tipo', value: displayType === 'bugs' ? 'Bugs' : displayType === 'mapas' ? 'Mapas' : displayType === 'carros' ? 'Carros' : displayType === 'roupas' ? 'Roupas' : displayType === 'itens' ? 'Itens' : displayType === 'coordenadas' ? 'Coordenadas' : displayType === 'logs' ? 'Logs' : displayType === 'atualizacoes' ? 'Atualizações' : displayType, inline: true }
-                ]);
-                logSystemAction(pendencyId ? 'Pendência atualizada' : 'Pendência criada', 'Pendências', {
-                    pendencyId: pendencyData.id,
-                    title: title,
-                    type: type,
-                    priority: priority
-                });
-                alert(`✅ Pendência ${pendencyId ? 'atualizada' : 'criada'} com sucesso!`);
-                closeModal('pendencyModal');
-                loadPendencies();
-            } catch (error) {
-                console.error('Erro ao salvar pendência:', error);
-                alert(`Erro ao salvar pendência: ${error.message || 'Erro desconhecido'}`);
+            const destinationSelect = document.getElementById('pendencyDestination');
+            const rawDestination = (destinationSelect?.value || '').toString().toLowerCase().trim();
+            const inferredDestination = inferPendencyAreaFromType(typeCategory === 'desenvolvimento' ? 'desenvolvimento' : type);
+            const destination = rawDestination || inferredDestination || 'geral';
+
+            // Regras: doações (financeiro) deve ir para C-Level
+            if (type === 'doacoes' && destination !== 'clevel') {
+                alert('Pendências financeiras (Doações) devem ter destino C-Level.');
+                return;
             }
+
+            const opKey = `pendency:save:${pendencyId || 'new'}`;
+            return withIdempotency(opKey, async () => {
+                if (!supabaseClient) {
+                    console.error('[pendencies] Supabase indisponível. Não foi possível salvar.');
+                    alert('Erro: sistema sem conexão com o banco. Recarregue a página.');
+                    return;
+                }
+
+                try {
+                    const existing = pendencyId ? state.pendencies.byId.get(String(pendencyId)) : null;
+                    const existingMeta = existing?.attachments && typeof existing.attachments === 'object'
+                        ? (existing.attachments._meta || existing.attachments.meta || null)
+                        : null;
+
+                    const assignedRole = destination === 'dev' ? 'dev' : null;
+                    const meta = {
+                        destination,
+                        assignedRole,
+                        createdByUserId: String(currentUser.id),
+                        createdByRole: String(currentUser.role || ''),
+                        createdByName: String(currentUser.displayName || currentUser.name || ''),
+                        clientRequestId: pendencyId ? `pendency:${pendencyId}` : `pendency:new:${Date.now()}`
+                    };
+
+                    const payloadBase = {
+                        user_id: String(currentUser.id),
+                        user_name: String(currentUser.displayName || currentUser.name || 'Usuário'),
+                        title: title,
+                        description: finalDescription,
+                        type: type,
+                        priority: priority,
+                        due_date: dueDate || null,
+                        created_by: String(currentUser.id),
+                        // `attachments` é JSONB na tabela padrão. Guardamos o destino aqui para roteamento sem migração.
+                        attachments: {
+                            ...(existing?.attachments && typeof existing.attachments === 'object' ? existing.attachments : {}),
+                            _meta: { ...(existingMeta || {}), ...meta }
+                        }
+                    };
+
+                    let savedRow = null;
+                    const isMissingAttachmentsColumn = (err) => {
+                        const msg = (err?.message || '').toString().toLowerCase();
+                        return msg.includes('attachments') && (msg.includes('could not find') || msg.includes('does not exist') || msg.includes('schema cache'));
+                    };
+                    const payloadNoAttachments = (() => {
+                        const copy = { ...payloadBase };
+                        delete copy.attachments;
+                        return copy;
+                    })();
+                    if (pendencyId) {
+                        const doUpdate = async (payload) => supabaseClient
+                            .from('pendencies')
+                            .update({ ...payload, updated_at: new Date().toISOString() })
+                            .eq('id', pendencyId)
+                            .select('*')
+                            .single();
+
+                        let result = await doUpdate(payloadBase);
+                        if (result.error && isMissingAttachmentsColumn(result.error)) {
+                            console.warn('[pendencies] Coluna attachments ausente; salvando sem destino/meta. Recomenda-se adicionar JSONB attachments.', result.error);
+                            result = await doUpdate(payloadNoAttachments);
+                        }
+                        if (result.error) {
+                            console.error('[pendencies] Erro ao atualizar:', { pendencyId, error: result.error, payloadBase });
+                            throw result.error;
+                        }
+                        savedRow = result.data;
+                    } else {
+                        const doInsert = async (payload) => supabaseClient
+                            .from('pendencies')
+                            .insert(payload)
+                            .select('*')
+                            .single();
+
+                        let result = await doInsert(payloadBase);
+                        if (result.error && isMissingAttachmentsColumn(result.error)) {
+                            console.warn('[pendencies] Coluna attachments ausente; salvando sem destino/meta. Recomenda-se adicionar JSONB attachments.', result.error);
+                            result = await doInsert(payloadNoAttachments);
+                        }
+                        if (result.error) {
+                            console.error('[pendencies] Erro ao inserir:', { error: result.error, payloadBase });
+                            throw result.error;
+                        }
+                        savedRow = result.data;
+                    }
+
+                    const normalized = normalizePendencyRow(savedRow);
+                    upsertItem(state.pendencies.byId, normalized);
+                    clearCacheKey('txd_pendencies');
+
+                    try {
+                        sendDiscordNotification('staff', pendencyId ? '✏️ Pendência Atualizada' : '📋 Nova Pendência Solicitada',
+                            pendencyId ? `Pendência #${normalized.id} atualizada` : `Nova pendência #${normalized.id} foi criada`,
+                            [
+                                { name: '📋 Título', value: title, inline: false },
+                                { name: '📌 Destino', value: destination.toUpperCase(), inline: true },
+                                { name: '👤 Solicitado por', value: payloadBase.user_name, inline: true },
+                                { name: '📊 Prioridade', value: priority === 'urgent' ? 'Urgente' : priority === 'high' ? 'Alta' : priority === 'medium' ? 'Média' : 'Baixa', inline: true },
+                                { name: '🏷️ Tipo', value: displayType === 'bugs' ? 'Bugs' : displayType === 'mapas' ? 'Mapas' : displayType === 'carros' ? 'Carros' : displayType === 'roupas' ? 'Roupas' : displayType === 'itens' ? 'Itens' : displayType === 'coordenadas' ? 'Coordenadas' : displayType === 'logs' ? 'Logs' : displayType === 'atualizacoes' ? 'Atualizações' : displayType, inline: true }
+                            ]);
+                    } catch (err) {
+                        console.warn('[pendencies] Falha ao notificar Discord:', err);
+                    }
+
+                    logSystemAction(pendencyId ? 'Pendência atualizada' : 'Pendência criada', 'Pendências', {
+                        pendencyId: normalized.id,
+                        title: title,
+                        destination,
+                        type: type,
+                        priority: priority
+                    });
+
+                    alert(`✅ Pendência ${pendencyId ? 'atualizada' : 'criada'} com sucesso!`);
+                    closeModal('pendencyModal');
+                    renderPendencias();
+                } catch (error) {
+                    console.error('[pendencies] Erro ao salvar pendência:', { pendencyId, error });
+                    alert(`Erro ao salvar pendência: ${error.message || 'Erro desconhecido'}`);
+                }
+            });
         }
         
         async function approvePendency(pendencyId) {
-            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role)) {
+            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
                 alert('Você não tem permissão para aprovar pendências.');
                 return;
             }
@@ -12511,8 +12957,14 @@ processDiscordCommand() diretamente.
                     return;
                 }
 
-                if (isFinancialPendencyType(directPendency.type) && !isCLevelRole(currentUser?.role)) {
+                const scope = getPendencyScope(directPendency.type);
+                if (scope === 'financial' && !isCLevelRole(currentUser?.role)) {
                     alert('Pendências financeiras só podem ser aprovadas por C-Level.');
+                    return;
+                }
+
+                if (scope === 'dev' && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+                    alert('Pendências de desenvolvimento só podem ser aprovadas por Desenvolvedores ou C-Level.');
                     return;
                 }
 
@@ -12528,13 +12980,26 @@ processDiscordCommand() diretamente.
                     .eq('id', pendencyId);
                 if (updateError) throw updateError;
                 clearCacheKey('txd_pendencies');
+                try {
+                    const normalized = normalizePendencyRow({
+                        ...directPendency,
+                        status: 'approved',
+                        response: response || null,
+                        approved_by: currentUser.name || currentUser.displayName,
+                        approved_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    });
+                    upsertItem(state.pendencies.byId, normalized);
+                } catch (e) {
+                    console.warn('[pendencies] Falha ao atualizar state (approve):', e);
+                }
                 sendDiscordNotification('staff', '✅ Pendência Aprovada', `Pendência #${pendencyId} foi aprovada`, [
                     { name: '📋 Título', value: directPendency.title || 'N/A', inline: false },
                     { name: '✅ Aprovada por', value: currentUser.name || currentUser.displayName, inline: true }
                 ]);
                 logSystemAction('Pendência aprovada', 'Pendências', { pendencyId });
                 alert('✅ Pendência aprovada com sucesso!');
-                loadPendencies();
+                renderPendencias();
             } catch (error) {
                 console.error('Erro ao aprovar pendência:', error);
                 alert('Erro ao aprovar pendência. Tente novamente.');
@@ -12542,7 +13007,7 @@ processDiscordCommand() diretamente.
         }
         
         async function rejectPendency(pendencyId) {
-            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role)) {
+            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
                 alert('Você não tem permissão para rejeitar pendências.');
                 return;
             }
@@ -12562,8 +13027,14 @@ processDiscordCommand() diretamente.
                     return;
                 }
 
-                if (isFinancialPendencyType(directPendency.type) && !isCLevelRole(currentUser?.role)) {
+                const scope = getPendencyScope(directPendency.type);
+                if (scope === 'financial' && !isCLevelRole(currentUser?.role)) {
                     alert('Pendências financeiras só podem ser rejeitadas por C-Level.');
+                    return;
+                }
+
+                if (scope === 'dev' && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+                    alert('Pendências de desenvolvimento só podem ser rejeitadas por Desenvolvedores ou C-Level.');
                     return;
                 }
 
@@ -12579,6 +13050,19 @@ processDiscordCommand() diretamente.
                     .eq('id', pendencyId);
                 if (updateError) throw updateError;
                 clearCacheKey('txd_pendencies');
+                try {
+                    const normalized = normalizePendencyRow({
+                        ...directPendency,
+                        status: 'rejected',
+                        response: reason,
+                        approved_by: currentUser.name || currentUser.displayName,
+                        approved_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    });
+                    upsertItem(state.pendencies.byId, normalized);
+                } catch (e) {
+                    console.warn('[pendencies] Falha ao atualizar state (reject):', e);
+                }
                 sendDiscordNotification('staff', '❌ Pendência Rejeitada', `Pendência #${pendencyId} foi rejeitada`, [
                     { name: '📋 Título', value: directPendency.title || 'N/A', inline: false },
                     { name: '❌ Rejeitada por', value: currentUser.name || currentUser.displayName, inline: true },
@@ -12586,7 +13070,7 @@ processDiscordCommand() diretamente.
                 ]);
                 logSystemAction('Pendência rejeitada', 'Pendências', { pendencyId, reason });
                 alert('✅ Pendência rejeitada.');
-                loadPendencies();
+                renderPendencias();
             } catch (error) {
                 console.error('Erro ao rejeitar pendência:', error);
                 alert('Erro ao rejeitar pendência. Tente novamente.');
@@ -12594,7 +13078,7 @@ processDiscordCommand() diretamente.
         }
         
         async function startPendency(pendencyId) {
-            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role)) {
+            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
                 alert('Você não tem permissão para iniciar pendências.');
                 return;
             }
@@ -12608,8 +13092,14 @@ processDiscordCommand() diretamente.
                     alert('Pendência não encontrada.');
                     return;
                 }
-                if (isFinancialPendencyType(directPendency.type) && !isCLevelRole(currentUser?.role)) {
+                
+                const scope = getPendencyScope(directPendency.type);
+                if (scope === 'financial' && !isCLevelRole(currentUser?.role)) {
                     alert('Pendências financeiras só podem ser iniciadas por C-Level.');
+                    return;
+                }
+                if (scope === 'dev' && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+                    alert('Pendências de desenvolvimento só podem ser iniciadas por Desenvolvedores ou C-Level.');
                     return;
                 }
 
@@ -12622,9 +13112,19 @@ processDiscordCommand() diretamente.
                     .eq('id', pendencyId);
                 if (updateError) throw updateError;
                 clearCacheKey('txd_pendencies');
+                try {
+                    const normalized = normalizePendencyRow({
+                        ...directPendency,
+                        status: 'in_progress',
+                        updated_at: new Date().toISOString()
+                    });
+                    upsertItem(state.pendencies.byId, normalized);
+                } catch (e) {
+                    console.warn('[pendencies] Falha ao atualizar state (start):', e);
+                }
                 logSystemAction('Pendência iniciada', 'Pendências', { pendencyId });
                 alert('✅ Pendência iniciada!');
-                loadPendencies();
+                renderPendencias();
             } catch (error) {
                 console.error('Erro ao iniciar pendência:', error);
                 alert('Erro ao iniciar pendência. Tente novamente.');
@@ -12632,7 +13132,7 @@ processDiscordCommand() diretamente.
         }
         
         async function completePendency(pendencyId) {
-            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role)) {
+            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
                 alert('Você não tem permissão para concluir pendências.');
                 return;
             }
@@ -12647,8 +13147,14 @@ processDiscordCommand() diretamente.
                     alert('Pendência não encontrada.');
                     return;
                 }
-                if (isFinancialPendencyType(directPendency.type) && !isCLevelRole(currentUser?.role)) {
+                
+                const scope = getPendencyScope(directPendency.type);
+                if (scope === 'financial' && !isCLevelRole(currentUser?.role)) {
                     alert('Pendências financeiras só podem ser concluídas por C-Level.');
+                    return;
+                }
+                if (scope === 'dev' && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+                    alert('Pendências de desenvolvimento só podem ser concluídas por Desenvolvedores ou C-Level.');
                     return;
                 }
 
@@ -12662,12 +13168,23 @@ processDiscordCommand() diretamente.
                     .eq('id', pendencyId);
                 if (updateError) throw updateError;
                 clearCacheKey('txd_pendencies');
+                try {
+                    const normalized = normalizePendencyRow({
+                        ...directPendency,
+                        status: 'completed',
+                        completed_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    });
+                    upsertItem(state.pendencies.byId, normalized);
+                } catch (e) {
+                    console.warn('[pendencies] Falha ao atualizar state (complete):', e);
+                }
                 sendDiscordNotification('staff', '✅ Pendência Concluída', `Pendência #${pendencyId} foi concluída!`, [
                     { name: '✅ Concluída por', value: currentUser.name || currentUser.displayName, inline: true }
                 ]);
                 logSystemAction('Pendência concluída', 'Pendências', { pendencyId });
                 alert('✅ Pendência marcada como concluída!');
-                loadPendencies();
+                renderPendencias();
             } catch (error) {
                 console.error('Erro ao concluir pendência:', error);
                 alert('Erro ao concluir pendência. Tente novamente.');
@@ -12675,9 +13192,8 @@ processDiscordCommand() diretamente.
         }
         
         async function viewPendencyDetails(pendencyId) {
-            const pendenciesRaw = await getData('txd_pendencies', false);
-            const pendencies = Array.isArray(pendenciesRaw) ? pendenciesRaw : [];
-            const pendency = pendencies.find(p => p.id == pendencyId);
+            await ensurePendenciesLoaded(false);
+            const pendency = state.pendencies.byId.get(String(pendencyId));
             if (!pendency) {
                 alert('Pendência não encontrada.');
                 return;
@@ -13104,6 +13620,106 @@ processDiscordCommand() diretamente.
             await saveData('txd_kanban', data);
         }
 
+        function normalizeKanbanCardForState(cardRow, assigneesOverride = null) {
+            const c = toCamelCase(cardRow || {});
+            const id = Number(c.id);
+            const assignees = Array.isArray(assigneesOverride)
+                ? assigneesOverride
+                : (Array.isArray(c.assignees) ? c.assignees : (c.assignee ? [c.assignee] : []));
+            return {
+                ...c,
+                id,
+                columnId: c.columnId || c.column_id || 'todo',
+                dueDate: c.dueDate || c.due_date || null,
+                tags: Array.isArray(c.tags) ? c.tags : (c.tags ? c.tags : []),
+                assignees
+            };
+        }
+
+        async function persistKanbanCard(cardData) {
+            if (!supabaseClient) throw new Error('Supabase não inicializado');
+            const id = Number(cardData?.id);
+            if (!id) throw new Error('ID inválido para tarefa');
+
+            const assignees = Array.isArray(cardData.assignees)
+                ? cardData.assignees
+                : (cardData.assignee ? [cardData.assignee] : []);
+            const uniqueAssignees = [...new Set(assignees.map(a => String(a).trim()).filter(Boolean))];
+
+            const row = {
+                id,
+                column_id: String(cardData.columnId || 'todo'),
+                title: String(cardData.title || '').trim(),
+                description: (cardData.description ?? '').toString(),
+                priority: (cardData.priority ?? '').toString(),
+                due_date: cardData.dueDate || null,
+                tags: Array.isArray(cardData.tags) ? cardData.tags : []
+            };
+
+            const { data: saved, error: upsertError } = await supabaseClient
+                .from('kanban_cards')
+                .upsert(row, { onConflict: 'id' })
+                .select('*')
+                .single();
+            if (upsertError) {
+                console.error('[kanban] Erro ao upsert card:', { upsertError, row });
+                throw upsertError;
+            }
+
+            // Assignees (tabela separada) - manter idempotente e sem duplicar
+            const { error: deleteAssigneesError } = await supabaseClient
+                .from('kanban_card_assignees')
+                .delete()
+                .eq('card_id', id);
+            if (deleteAssigneesError) {
+                console.warn('[kanban] Aviso ao limpar assignees:', deleteAssigneesError);
+            }
+
+            if (uniqueAssignees.length > 0) {
+                const assigneesRows = uniqueAssignees.map(name => ({
+                    card_id: id,
+                    assignee_name: name
+                }));
+                const { error: assigneesError } = await supabaseClient
+                    .from('kanban_card_assignees')
+                    .upsert(assigneesRows, { onConflict: 'card_id,assignee_name' });
+                if (assigneesError) {
+                    console.warn('[kanban] Aviso ao salvar assignees:', assigneesError);
+                }
+            }
+
+            // Atualizar state imediatamente (realtime também vai confirmar)
+            const normalized = normalizeKanbanCardForState(saved, uniqueAssignees);
+            upsertItem(state.kanban.cardsById, normalized);
+            state.kanban.assigneesByCardId.set(String(id), uniqueAssignees);
+            clearCacheKey('txd_kanban');
+
+            return normalized;
+        }
+
+        async function updateKanbanCardColumn(cardId, newColumnId) {
+            if (!supabaseClient) throw new Error('Supabase não inicializado');
+            const id = Number(cardId);
+            if (!id) throw new Error('ID inválido');
+            const columnId = String(newColumnId || 'todo');
+
+            const { data: updated, error } = await supabaseClient
+                .from('kanban_cards')
+                .update({ column_id: columnId, updated_at: new Date().toISOString() })
+                .eq('id', id)
+                .select('*')
+                .single();
+            if (error) {
+                console.error('[kanban] Erro ao mover card:', { id, columnId, error });
+                throw error;
+            }
+
+            const normalized = normalizeKanbanCardForState(updated);
+            upsertItem(state.kanban.cardsById, normalized);
+            clearCacheKey('txd_kanban');
+            return normalized;
+        }
+
         async function populateCardAssigneeOptions(selectedValues = []) {
             const assigneeSelect = document.getElementById('cardAssignee');
             if (!assigneeSelect) return;
@@ -13152,10 +13768,12 @@ processDiscordCommand() diretamente.
                 return;
             }
             
-            cardIdInput.value = '';
             cardModalTitle.textContent = 'Nova Tarefa';
             cardColumnIdInput.value = columnId || 'todo';
             cardForm.reset();
+            cardForm.dataset.mode = 'create';
+            // Gerar ID uma única vez (evita duplicação em double-click / submits repetidos)
+            cardIdInput.value = String(Date.now());
             
             // Atualizar lista de responsáveis
             await populateCardAssigneeOptions([]);
@@ -13174,7 +13792,8 @@ processDiscordCommand() diretamente.
                 alert('Você precisa estar logado para editar tarefas.');
                 return;
             }
-            const kanbanData = await getKanbanData();
+            await ensureKanbanLoaded(false);
+            const kanbanData = getKanbanSnapshotFromState();
             if (!kanbanData || !Array.isArray(kanbanData.cards)) {
                 alert('Erro ao carregar dados do Kanban.');
                 return;
@@ -13206,6 +13825,8 @@ processDiscordCommand() diretamente.
             
             cardIdInput.value = card.id;
             cardModalTitle.textContent = 'Editar Tarefa';
+            const cardForm = document.getElementById('cardForm');
+            if (cardForm) cardForm.dataset.mode = 'edit';
             cardColumnIdInput.value = card.columnId || 'todo';
             cardTitleInput.value = card.title || '';
             if (cardDescriptionInput) cardDescriptionInput.value = card.description || '';
@@ -13241,7 +13862,8 @@ processDiscordCommand() diretamente.
                 }
                 
                 const cardId = cardIdInput.value;
-                const isEdit = cardId && cardId !== '';
+                const mode = document.getElementById('cardForm')?.dataset?.mode || '';
+                const isEdit = mode === 'edit';
                 
                 // Verificar permissões (permitir para usuários logados)
                 const canEdit = hasPermission('task.edit') || hasPermission('dashboard') || currentUser?.role;
@@ -13264,26 +13886,12 @@ processDiscordCommand() diretamente.
                     return;
                 }
                 
-                let kanbanData = await getKanbanData();
-                
-                // Garantir estrutura correta
-                if (!kanbanData) {
-                    kanbanData = { columns: [], cards: [] };
-                }
-                if (!Array.isArray(kanbanData.cards)) {
-                    kanbanData.cards = [];
-                }
-                if (!Array.isArray(kanbanData.columns)) {
-                    kanbanData.columns = [
-                        { id: 'todo', name: 'Para Fazer', color: '#6F7276' },
-                        { id: 'inprogress', name: 'Em Progresso', color: '#ffaa00' },
-                        { id: 'review', name: 'Em Revisão', color: '#3b82f6' },
-                        { id: 'done', name: 'Concluído', color: '#00ff88' }
-                    ];
-                }
-                
+                await ensureKanbanLoaded(false);
+                const id = parseInt(cardId) || Date.now();
+                const existing = state.kanban.cardsById.get(String(id));
+
                 const cardData = {
-                    id: parseInt(cardId) || Date.now(),
+                    id,
                     columnId: cardColumnIdInput.value || 'todo',
                     title: title,
                     description: cardDescriptionInput ? cardDescriptionInput.value : '',
@@ -13291,63 +13899,59 @@ processDiscordCommand() diretamente.
                     assignee: cardAssigneeInput ? cardAssigneeInput.value : '',
                     assignees: cardAssigneeInput && cardAssigneeInput.value ? [cardAssigneeInput.value] : [],
                     tags: cardTagsInput ? cardTagsInput.value.split(',').map(t => t.trim()).filter(t => t) : [],
-                    createdAt: isEdit ? (kanbanData.cards.find(c => c && c.id == cardId)?.createdAt || new Date().toISOString()) : new Date().toISOString(),
+                    createdAt: existing?.createdAt || existing?.created_at || new Date().toISOString(),
                     updatedAt: new Date().toISOString()
                 };
-                
-                // Adicionar dueDate apenas se tiver valor (campo opcional)
                 if (cardDueDateInput && cardDueDateInput.value && cardDueDateInput.value.trim() !== '') {
                     cardData.dueDate = cardDueDateInput.value;
                 }
 
-            const existingIndex = kanbanData.cards.findIndex(c => c.id == cardData.id);
-            if (existingIndex !== -1) {
-                kanbanData.cards[existingIndex] = { ...kanbanData.cards[existingIndex], ...cardData };
-                
-                // Notificar Discord sobre edição de tarefa (apenas se Discord estiver habilitado)
-                const discordConfig = getDiscordConfig();
-                if (discordConfig && discordConfig.enabled && discordConfig.notifications && discordConfig.notifications.tasks) {
-                const columnName = kanbanData.columns.find(col => col.id === cardData.columnId)?.name || cardData.columnId;
-                sendDiscordNotification('tasks', '✏️ Tarefa Editada', 
-                    `${currentUser.name} editou uma tarefa`,
-                    [
-                        { name: '📋 Tarefa', value: cardData.title, inline: false },
-                        { name: '📝 Descrição', value: cardData.description || 'Sem descrição', inline: false },
-                        { name: '📊 Coluna', value: columnName, inline: true },
-                        { name: '⚡ Prioridade', value: cardData.priority === 'high' ? '🔴 Alta' : cardData.priority === 'medium' ? '🟡 Média' : '🟢 Baixa', inline: true },
-                        { name: '📅 Prazo', value: cardData.dueDate || 'Sem prazo', inline: true },
-                        { name: '👤 Responsável', value: cardData.assignee || 'Não atribuído', inline: true },
-                        { name: '👨‍💼 Editado por', value: currentUser.name, inline: true }
-                    ]
-                );
-                }
-            } else {
-                kanbanData.cards.push(cardData);
-                
-                // Notificar Discord sobre nova tarefa (apenas se Discord estiver habilitado)
-                const discordConfig = getDiscordConfig();
-                if (discordConfig && discordConfig.enabled && discordConfig.notifications && discordConfig.notifications.tasks) {
-                    const columnName = kanbanData.columns.find(col => col.id === cardData.columnId)?.name || cardData.columnId;
-                    sendDiscordNotification('tasks', '✨ Nova Tarefa Criada', 
-                        `${currentUser.name} criou uma nova tarefa`,
-                        [
-                            { name: '📋 Tarefa', value: cardData.title, inline: false },
-                            { name: '📝 Descrição', value: cardData.description || 'Sem descrição', inline: false },
-                            { name: '📊 Coluna', value: columnName, inline: true },
-                            { name: '⚡ Prioridade', value: cardData.priority === 'high' ? '🔴 Alta' : cardData.priority === 'medium' ? '🟡 Média' : '🟢 Baixa', inline: true },
-                            { name: '📅 Prazo', value: cardData.dueDate || 'Sem prazo', inline: true },
-                            { name: '👤 Responsável', value: cardData.assignee || 'Não atribuído', inline: true },
-                            { name: '🏷️ Tags', value: cardData.tags.length > 0 ? cardData.tags.join(', ') : 'Sem tags', inline: false },
-                            { name: '👨‍💼 Criado por', value: currentUser.name, inline: true }
-                        ]
-                    );
-                }
-            }
+                const opKey = `kanban:save:${id}`;
+                const submitter = event?.submitter;
+                if (submitter) submitter.disabled = true;
+                try {
+                    await withIdempotency(opKey, async () => {
+                        const saved = await persistKanbanCard(cardData);
 
-                await saveKanbanData(kanbanData);
+                        const discordConfig = getDiscordConfig();
+                        if (discordConfig && discordConfig.enabled && discordConfig.notifications && discordConfig.notifications.tasks) {
+                            const columnName = state.kanban.columnsById.get(String(saved.columnId))?.name || saved.columnId;
+                            if (isEdit) {
+                                sendDiscordNotification('tasks', '✏️ Tarefa Editada',
+                                    `${currentUser.name} editou uma tarefa`,
+                                    [
+                                        { name: '📋 Tarefa', value: saved.title, inline: false },
+                                        { name: '📝 Descrição', value: saved.description || 'Sem descrição', inline: false },
+                                        { name: '📊 Coluna', value: columnName, inline: true },
+                                        { name: '⚡ Prioridade', value: saved.priority === 'high' ? '🔴 Alta' : saved.priority === 'medium' ? '🟡 Média' : '🟢 Baixa', inline: true },
+                                        { name: '📅 Prazo', value: saved.dueDate || 'Sem prazo', inline: true },
+                                        { name: '👤 Responsável', value: saved.assignees?.[0] || 'Não atribuído', inline: true },
+                                        { name: '👨‍💼 Editado por', value: currentUser.name, inline: true }
+                                    ]
+                                );
+                            } else {
+                                sendDiscordNotification('tasks', '✨ Nova Tarefa Criada',
+                                    `${currentUser.name} criou uma nova tarefa`,
+                                    [
+                                        { name: '📋 Tarefa', value: saved.title, inline: false },
+                                        { name: '📝 Descrição', value: saved.description || 'Sem descrição', inline: false },
+                                        { name: '📊 Coluna', value: columnName, inline: true },
+                                        { name: '⚡ Prioridade', value: saved.priority === 'high' ? '🔴 Alta' : saved.priority === 'medium' ? '🟡 Média' : '🟢 Baixa', inline: true },
+                                        { name: '📅 Prazo', value: saved.dueDate || 'Sem prazo', inline: true },
+                                        { name: '👤 Responsável', value: saved.assignees?.[0] || 'Não atribuído', inline: true },
+                                        { name: '🏷️ Tags', value: Array.isArray(saved.tags) && saved.tags.length > 0 ? saved.tags.join(', ') : 'Sem tags', inline: false },
+                                        { name: '👨‍💼 Criado por', value: currentUser.name, inline: true }
+                                    ]
+                                );
+                            }
+                        }
+                    });
+                } finally {
+                    if (submitter) submitter.disabled = false;
+                }
+
                 closeModal('cardModal');
-                // NÃO recarregar imediatamente - deixar o real-time fazer isso
-                // loadKanban();
+                renderTarefas();
                 alert('Tarefa salva com sucesso!');
                 
             } catch (error) {
@@ -13366,62 +13970,43 @@ processDiscordCommand() diretamente.
             if (!confirm('Tem certeza que deseja excluir esta tarefa?')) return;
             
             try {
-                // Buscar dados da tarefa antes de deletar (para notificação)
-                let kanbanData = await getKanbanData();
-                const deletedCard = kanbanData.cards?.find(c => c && (c.id == cardId || c.id === cardId));
-                
-                // Deletar assignees primeiro (cascade)
-                if (supabaseClient) {
+                await ensureKanbanLoaded(false);
+                const id = Number(cardId);
+                const deletedCard = state.kanban.cardsById.get(String(id));
+
+                const opKey = `kanban:delete:${id}`;
+                await withIdempotency(opKey, async () => {
+                    if (!supabaseClient) throw new Error('Supabase não inicializado');
+
+                    // Deletar assignees primeiro (cascade)
                     const { error: deleteAssigneesError } = await supabaseClient
                         .from('kanban_card_assignees')
                         .delete()
-                        .eq('card_id', cardId);
-                    
+                        .eq('card_id', id);
                     if (deleteAssigneesError) {
-                        console.warn('Aviso ao deletar assignees (pode ser normal):', deleteAssigneesError.message);
+                        console.warn('[kanban] Aviso ao deletar assignees:', deleteAssigneesError.message);
                     }
-                }
-                
-                // Deletar o card diretamente do Supabase
-                if (supabaseClient) {
+
                     const { error: deleteError } = await supabaseClient
                         .from('kanban_cards')
                         .delete()
-                        .eq('id', cardId);
-                    
+                        .eq('id', id);
                     if (deleteError) {
-                        console.error('Erro ao deletar card do Supabase:', deleteError);
-                        alert('Erro ao excluir tarefa: ' + (deleteError.message || 'Erro desconhecido'));
-                        return;
+                        console.error('[kanban] Erro ao deletar card:', { id, deleteError });
+                        throw deleteError;
                     }
-                }
-                
-                // Limpar cache para forçar reload
-                clearCacheKey('txd_kanban');
-                
-                // Remover visualmente o card com animação
-                const cardElement = document.querySelector(`[data-card-id="${cardId}"]`);
-                if (cardElement) {
-                    cardElement.style.transition = 'all 0.3s ease';
-                    cardElement.style.opacity = '0';
-                    cardElement.style.transform = 'scale(0.8)';
-                    setTimeout(() => {
-                        if (cardElement.parentNode) {
-                            cardElement.remove();
-                        }
-                    }, 300);
-                }
-                
-                // Recarregar após um delay para garantir que o Supabase processou
-                setTimeout(() => {
-                    loadKanban();
-                }, 500);
-                
+
+                    removeItem(state.kanban.cardsById, id);
+                    state.kanban.assigneesByCardId.delete(String(id));
+                    clearCacheKey('txd_kanban');
+                    renderTarefas();
+                });
+
                 // Notificar Discord sobre exclusão (apenas se Discord estiver habilitado)
                 if (deletedCard) {
                     const discordConfig = getDiscordConfig();
                     if (discordConfig && discordConfig.enabled && discordConfig.notifications && discordConfig.notifications.tasks) {
-                        sendDiscordNotification('tasks', '❌ Tarefa Excluída', 
+                        sendDiscordNotification('tasks', '❌ Tarefa Excluída',
                             `${currentUser?.name || 'Usuário'} excluiu uma tarefa`,
                             [
                                 { name: '📋 Tarefa', value: deletedCard.title || 'Sem título', inline: false },
@@ -13510,24 +14095,27 @@ processDiscordCommand() diretamente.
                     if (draggedCard) {
                         const cardId = parseInt(draggedCard.getAttribute('data-card-id'));
                         const newColumnId = column.getAttribute('data-column');
-                        
-                        const kanbanData = await getKanbanData();
-                        if (!kanbanData || !Array.isArray(kanbanData.cards)) {
-                            draggedCard = null;
-                            draggedCardElement = null;
-                            return;
-                        }
-                        const card = kanbanData.cards.find(c => c.id === cardId);
+
+                        await ensureKanbanLoaded(false);
+                        const card = state.kanban.cardsById.get(String(cardId));
                         if (card) {
                             const oldColumnId = card.columnId;
-                            const oldColumnName = kanbanData.columns.find(col => col.id === oldColumnId)?.name || oldColumnId;
-                            const newColumnName = kanbanData.columns.find(col => col.id === newColumnId)?.name || newColumnId;
-                            
-                            card.columnId = newColumnId;
-                            card.updatedAt = new Date().toISOString();
-                            await saveKanbanData(kanbanData);
-                            // NÃO recarregar imediatamente - deixar o real-time fazer isso
-                            // loadKanban();
+                            const oldColumnName = state.kanban.columnsById.get(String(oldColumnId))?.name || oldColumnId;
+                            const newColumnName = state.kanban.columnsById.get(String(newColumnId))?.name || newColumnId;
+
+                            if (oldColumnId !== newColumnId) {
+                                const opKey = `kanban:move:${cardId}:${newColumnId}`;
+                                try {
+                                    await withIdempotency(opKey, async () => {
+                                        await updateKanbanCardColumn(cardId, newColumnId);
+                                    });
+                                    renderTarefas();
+                                } catch (error) {
+                                    console.error('[kanban] Erro ao mover tarefa via drag&drop:', { cardId, newColumnId, error });
+                                    alert('Erro ao mover tarefa: ' + (error.message || 'Erro desconhecido'));
+                                    renderTarefas();
+                                }
+                            }
                             
                             // Notificar Discord sobre movimentação de tarefa (apenas se Discord estiver habilitado)
                             // Verificar ANTES de chamar getDiscordConfig para evitar logs desnecessários
@@ -13544,7 +14132,7 @@ processDiscordCommand() diretamente.
                                                 { name: '📋 Tarefa', value: card.title, inline: false },
                                                 { name: '📤 De', value: oldColumnName, inline: true },
                                                 { name: '📥 Para', value: newColumnName, inline: true },
-                                                { name: '👤 Responsável', value: card.assignee || 'Não atribuído', inline: true },
+                                                { name: '👤 Responsável', value: (Array.isArray(card.assignees) ? card.assignees[0] : card.assignee) || 'Não atribuído', inline: true },
                                                 { name: '👨‍💼 Movido por', value: currentUser.name, inline: true },
                                                 { name: '🕐 Horário', value: new Date().toLocaleString('pt-BR'), inline: true }
                                             ]
@@ -13602,7 +14190,8 @@ processDiscordCommand() diretamente.
                 const [staff, events, announcements, messages, groups, commands, favorites, usage, discord, requests, kanban] = await Promise.all([
                     getData('txd_staff', forceRefresh),
                     getData('txd_events', forceRefresh),
-                    getData('txd_announcements', forceRefresh),                    getData('txd_chat_messages', forceRefresh),
+                    getData('txd_announcements', forceRefresh),
+                    getData('txd_chat_messages', forceRefresh),
                     getData('txd_chat_groups', forceRefresh),
                     getData('txd_commands', forceRefresh),
                     getData('txd_favorite_commands', forceRefresh),
@@ -15245,4 +15834,3 @@ processDiscordCommand() diretamente.
 
 </body>
 </html>
-
