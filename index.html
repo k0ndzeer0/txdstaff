@@ -2544,10 +2544,11 @@
                     </div>
                 </div>
                 <div class="input-group">
-                    <label>Responsável</label>
-                    <select id="cardAssignee">
+                    <label>Responsáveis</label>
+                    <select id="cardAssignee" multiple size="4">
                         <option value="">Sem responsável</option>
                     </select>
+                    <small style="color: var(--gray-text); font-size: 12px; margin-top: 6px; display: block;">Dica: segure Ctrl (Windows) ou Cmd (Mac) para selecionar mais de 1.</small>
                 </div>
                 <div class="input-group">
                     <label>Tags (separadas por vírgula)</label>
@@ -8269,6 +8270,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                             ` : ''}
                             ${canApprove && (pendency.status === 'approved' || pendency.status === 'Aprovada') ? `
                             <button class="btn-modal btn-primary" style="padding: 6px 12px; font-size: 12px;" onclick="startPendency(${pendency.id})" title="Iniciar"><i class="fas fa-play"></i></button>
+                            <button class="btn-modal btn-success" style="padding: 6px 12px; font-size: 12px;" onclick="completePendency(${pendency.id})" title="Concluir"><i class="fas fa-check-circle"></i></button>
                             ` : ''}
                             ${canApprove && (pendency.status === 'in_progress' || pendency.status === 'Em Andamento') ? `
                             <button class="btn-modal btn-success" style="padding: 6px 12px; font-size: 12px;" onclick="completePendency(${pendency.id})" title="Concluir"><i class="fas fa-check-circle"></i></button>
@@ -13136,6 +13138,10 @@ processDiscordCommand() diretamente.
                 alert('Você não tem permissão para concluir pendências.');
                 return;
             }
+            if (!supabaseClient) {
+                alert('Banco de dados indisponível. Recarregue a página.');
+                return;
+            }
             if (!confirm('Deseja marcar esta pendência como concluída?')) return;
             try {
                 const { data: directPendency, error: directError } = await supabaseClient
@@ -13145,6 +13151,20 @@ processDiscordCommand() diretamente.
                     .single();
                 if (directError || !directPendency) {
                     alert('Pendência não encontrada.');
+                    return;
+                }
+
+                const rawStatus = (directPendency.status || '').toString().toLowerCase().trim();
+                if (['completed', 'concluida', 'concluída'].includes(rawStatus)) {
+                    alert('Esta pendência já está concluída.');
+                    return;
+                }
+                if (['rejected', 'rejeitada'].includes(rawStatus)) {
+                    alert('Esta pendência está rejeitada e não pode ser concluída.');
+                    return;
+                }
+                if (['pending', 'pendente'].includes(rawStatus)) {
+                    alert('A pendência precisa ser aprovada antes de concluir.');
                     return;
                 }
                 
@@ -13158,22 +13178,42 @@ processDiscordCommand() diretamente.
                     return;
                 }
 
-                const { error: updateError } = await supabaseClient
+                const completedAt = new Date().toISOString();
+                const basePayload = {
+                    status: 'completed',
+                    completed_at: completedAt,
+                    updated_at: completedAt
+                };
+
+                const attemptUpdate = async (payload) => supabaseClient
                     .from('pendencies')
-                    .update({
-                        status: 'completed',
-                        completed_at: new Date().toISOString(),
-                        updated_at: new Date().toISOString()
-                    })
+                    .update(payload)
                     .eq('id', pendencyId);
-                if (updateError) throw updateError;
+
+                let updateResult = await attemptUpdate(basePayload);
+                if (updateResult.error) {
+                    const msg = (updateResult.error.message || '').toString().toLowerCase();
+                    // Compatibilidade caso o schema não tenha algumas colunas (ex: completed_at / updated_at)
+                    if (msg.includes('completed_at') && (msg.includes('could not find') || msg.includes('does not exist') || msg.includes('schema cache'))) {
+                        console.warn('[pendencies] Coluna completed_at ausente; concluindo sem completed_at.', updateResult.error);
+                        updateResult = await attemptUpdate({ status: 'completed', updated_at: completedAt });
+                    }
+                }
+                if (updateResult.error) {
+                    const msg = (updateResult.error.message || '').toString().toLowerCase();
+                    if (msg.includes('updated_at') && (msg.includes('could not find') || msg.includes('does not exist') || msg.includes('schema cache'))) {
+                        console.warn('[pendencies] Coluna updated_at ausente; concluindo apenas com status.', updateResult.error);
+                        updateResult = await attemptUpdate({ status: 'completed' });
+                    }
+                }
+                if (updateResult.error) throw updateResult.error;
                 clearCacheKey('txd_pendencies');
                 try {
                     const normalized = normalizePendencyRow({
                         ...directPendency,
                         status: 'completed',
-                        completed_at: new Date().toISOString(),
-                        updated_at: new Date().toISOString()
+                        completed_at: completedAt,
+                        updated_at: completedAt
                     });
                     upsertItem(state.pendencies.byId, normalized);
                 } catch (e) {
@@ -13620,6 +13660,14 @@ processDiscordCommand() diretamente.
             await saveData('txd_kanban', data);
         }
 
+        function getSelectValues(selectEl) {
+            if (!selectEl) return [];
+            const options = Array.from(selectEl.selectedOptions || []);
+            return options
+                .map(opt => String(opt.value || '').trim())
+                .filter(v => v && v !== '');
+        }
+
         function normalizeKanbanCardForState(cardRow, assigneesOverride = null) {
             const c = toCamelCase(cardRow || {});
             const id = Number(c.id);
@@ -13741,8 +13789,12 @@ processDiscordCommand() diretamente.
             }).filter(Boolean).join('');
 
             assigneeSelect.innerHTML = '<option value="">Sem responsável</option>' + optionsHtml;
-            if (normalizedSelected.length > 0 && !normalizedSelected.includes('')) {
-                assigneeSelect.value = normalizedSelected[0];
+            // Multi-select: marcar selecionados explicitamente
+            if (normalizedSelected.length > 0) {
+                Array.from(assigneeSelect.options).forEach(opt => {
+                    const v = String(opt.value || '').trim();
+                    opt.selected = v && normalizedSelected.includes(v);
+                });
             }
         }
 
@@ -13890,14 +13942,16 @@ processDiscordCommand() diretamente.
                 const id = parseInt(cardId) || Date.now();
                 const existing = state.kanban.cardsById.get(String(id));
 
+                const selectedAssignees = getSelectValues(cardAssigneeInput);
+
                 const cardData = {
                     id,
                     columnId: cardColumnIdInput.value || 'todo',
                     title: title,
                     description: cardDescriptionInput ? cardDescriptionInput.value : '',
                     priority: cardPriorityInput ? cardPriorityInput.value : '',
-                    assignee: cardAssigneeInput ? cardAssigneeInput.value : '',
-                    assignees: cardAssigneeInput && cardAssigneeInput.value ? [cardAssigneeInput.value] : [],
+                    assignee: selectedAssignees[0] || '',
+                    assignees: selectedAssignees,
                     tags: cardTagsInput ? cardTagsInput.value.split(',').map(t => t.trim()).filter(t => t) : [],
                     createdAt: existing?.createdAt || existing?.created_at || new Date().toISOString(),
                     updatedAt: new Date().toISOString()
