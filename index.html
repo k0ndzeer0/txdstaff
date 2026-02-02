@@ -2731,6 +2731,25 @@
             };
         }
 
+        function normalizePendencyStatusValue(statusValue, pendency) {
+            const completedAt = pendency?.completedAt ?? pendency?.completed_at ?? null;
+            const raw = (statusValue ?? pendency?.status ?? '').toString().trim().toLowerCase();
+
+            // Rejeitada sempre prevalece
+            if (raw === 'rejected' || raw === 'rejeitada' || raw === 'rejeitado') return 'rejected';
+
+            // Se já possui completed_at, tratar como concluída (mesmo se status antigo estiver errado)
+            if (completedAt) return 'completed';
+
+            if (!raw) return 'pending';
+            if (raw === 'pending' || raw === 'pendente') return 'pending';
+            if (raw === 'in_progress' || raw === 'in progress' || raw === 'em andamento' || raw === 'andamento') return 'in_progress';
+            if (raw === 'approved' || raw === 'aprovada' || raw === 'aprovado') return 'approved';
+            if (raw === 'completed' || raw === 'concluida' || raw === 'concluída') return 'completed';
+
+            return raw;
+        }
+
         function inferPendencyAreaFromType(type) {
             const scope = getPendencyScope(type);
             if (scope === 'financial') return 'clevel';
@@ -8001,9 +8020,11 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 return true;
             };
 
-            const pendingPendencies = visiblePendencies.filter(p => p.status === 'pending' || p.status === 'Pendente');
-            const inProgressPendencies = visiblePendencies.filter(p => p.status === 'in_progress' || p.status === 'Em Andamento');
-            const completedPendencies = visiblePendencies.filter(p => p.status === 'completed' || p.status === 'Concluída');
+            const pendingPendencies = visiblePendencies.filter(p => normalizePendencyStatusValue(p?.status, p) === 'pending');
+            const approvedPendencies = visiblePendencies.filter(p => normalizePendencyStatusValue(p?.status, p) === 'approved');
+            const rejectedPendencies = visiblePendencies.filter(p => normalizePendencyStatusValue(p?.status, p) === 'rejected');
+            const inProgressPendencies = visiblePendencies.filter(p => normalizePendencyStatusValue(p?.status, p) === 'in_progress');
+            const completedPendencies = visiblePendencies.filter(p => normalizePendencyStatusValue(p?.status, p) === 'completed');
             const totalPendencies = visiblePendencies.length;
             const urgentPendencies = visiblePendencies.filter(p => p.priority === 'urgent' || p.priority === 'Urgente').length;
             const myPendingCount = pendingPendencies.length;
@@ -8019,6 +8040,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 });
             };
             const sortedPending = sortPendencies([...pendingPendencies]);
+            const sortedApproved = sortPendencies([...approvedPendencies]);
+            const sortedRejected = sortPendencies([...rejectedPendencies]);
             const sortedInProgress = sortPendencies([...inProgressPendencies]);
             const canCreate = true;
             const canApprove = canApproveBase;
@@ -8097,6 +8120,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                         <select id="pendencyStatusFilter" onchange="filterPendencies()" style="padding: 8px 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 6px; color: var(--white-soft); font-size: 14px; cursor: pointer;">
                             <option value="all">Todos os Status</option>
                             <option value="pending">Pendentes</option>
+                            <option value="approved">Aprovadas</option>
                             <option value="in_progress">Em Andamento</option>
                             <option value="completed">Concluídas</option>
                             <option value="rejected">Rejeitadas</option>
@@ -8146,6 +8170,33 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                     <div style="display: grid; gap: 16px;" id="inProgressPendenciesList">
                         ${sortedInProgress.map(p => renderPendencyCard(p, canApprovePendency(p), canEdit, false)).join('')}
                     </div>
+                </div>
+                ` : ''}
+                ${canApprove && sortedApproved.length > 0 ? `
+                <div style="margin-bottom: 32px;">
+                    <details style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border);">
+                        <summary style="cursor: pointer; color: var(--white-soft); font-size: 18px; font-weight: 600; margin-bottom: 16px; user-select: none;">
+                            <i class="fas fa-check" style="color: var(--success); margin-right: 8px;"></i>
+                            Aprovadas (${sortedApproved.length})
+                        </summary>
+                        <div style="display: grid; gap: 16px; margin-top: 16px;" id="approvedPendenciesList">
+                            ${sortedApproved.map(p => renderPendencyCard(p, canApprovePendency(p), canEdit, false)).join('')}
+                        </div>
+                    </details>
+                </div>
+                ` : ''}
+                ${canApprove && sortedRejected.length > 0 ? `
+                <div style="margin-bottom: 32px;">
+                    <details style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border);">
+                        <summary style="cursor: pointer; color: var(--white-soft); font-size: 18px; font-weight: 600; margin-bottom: 16px; user-select: none;">
+                            <i class="fas fa-times" style="color: var(--danger); margin-right: 8px;"></i>
+                            Rejeitadas (${sortedRejected.length})
+                        </summary>
+                        <div style="display: grid; gap: 16px; margin-top: 16px;" id="rejectedPendenciesList">
+                            ${sortedRejected.slice(0, 10).map(p => renderPendencyCard(p, canApprovePendency(p), canEdit, false)).join('')}
+                            ${sortedRejected.length > 10 ? `<p style="color: var(--gray-text); font-size: 12px; text-align: center; margin-top: 8px;">Mostrando últimos 10. Total: ${sortedRejected.length}</p>` : ''}
+                        </div>
+                    </details>
                 </div>
                 ` : ''}
                 ${!canApprove && myPendencies.length > 0 ? `
@@ -8215,37 +8266,29 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             const scope = getPendencyScope(pendency.type); // compatibilidade
             const area = getEffectivePendencyArea(pendency);
             const isDevDestination = area === 'dev';
+            const normalizedStatus = normalizePendencyStatusValue(pendency?.status, pendency);
+            const isActuallyCompleted = isCompleted || normalizedStatus === 'completed';
             const statusLabels = {
                 'pending': 'Pendente',
-                'Pendente': 'Pendente',
                 'in_progress': 'Em Andamento',
-                'Em Andamento': 'Em Andamento',
                 'approved': 'Aprovada',
-                'Aprovada': 'Aprovada',
                 'completed': 'Concluída',
-                'Concluída': 'Concluída',
                 'rejected': 'Rejeitada',
-                'Rejeitada': 'Rejeitada'
             };
-            const statusLabel = statusLabels[pendency.status] || pendency.status || 'Pendente';
+            const statusLabel = statusLabels[normalizedStatus] || 'Pendente';
             const statusColors = {
                 'pending': 'var(--warning)',
-                'Pendente': 'var(--warning)',
                 'in_progress': 'var(--primary)',
-                'Em Andamento': 'var(--primary)',
                 'approved': 'var(--success)',
-                'Aprovada': 'var(--success)',
                 'completed': 'var(--success)',
-                'Concluída': 'var(--success)',
                 'rejected': 'var(--danger)',
-                'Rejeitada': 'var(--danger)'
             };
-            const statusColor = statusColors[pendency.status] || 'var(--warning)';
+            const statusColor = statusColors[normalizedStatus] || 'var(--warning)';
             const createdAt = new Date(pendency.createdAt || pendency.created_at || 0);
             const dueDate = pendency.dueDate || pendency.due_date;
-            const isOverdue = dueDate && new Date(dueDate) < new Date() && (pendency.status === 'pending' || pendency.status === 'Pendente' || pendency.status === 'in_progress' || pendency.status === 'Em Andamento');
+            const isOverdue = dueDate && new Date(dueDate) < new Date() && (normalizedStatus === 'pending' || normalizedStatus === 'in_progress' || normalizedStatus === 'approved');
             return `
-                <div class="pendency-card" data-pendency-id="${pendency.id}" data-status="${pendency.status}" data-priority="${priority}" data-type="${pendency.type}" style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border); ${isCompleted ? 'opacity: 0.7;' : ''} ${isOverdue ? 'border-left: 4px solid var(--danger);' : ''}">
+                <div class="pendency-card" data-pendency-id="${pendency.id}" data-status="${normalizedStatus}" data-priority="${priority}" data-type="${pendency.type}" style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border); ${isActuallyCompleted ? 'opacity: 0.7;' : ''} ${isOverdue ? 'border-left: 4px solid var(--danger);' : ''}">
                     <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 12px; flex-wrap: wrap; gap: 12px;">
                         <div style="flex: 1;">
                             <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap;">
@@ -8264,15 +8307,15 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                             </div>
                         </div>
                         <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                            ${canApprove && (pendency.status === 'pending' || pendency.status === 'Pendente') ? `
+                            ${!isActuallyCompleted && canApprove && normalizedStatus === 'pending' ? `
                             <button class="btn-modal btn-success" style="padding: 6px 12px; font-size: 12px;" onclick="approvePendency(${pendency.id})" title="Aprovar"><i class="fas fa-check"></i></button>
                             <button class="btn-modal btn-danger" style="padding: 6px 12px; font-size: 12px;" onclick="rejectPendency(${pendency.id})" title="Rejeitar"><i class="fas fa-times"></i></button>
                             ` : ''}
-                            ${canApprove && (pendency.status === 'approved' || pendency.status === 'Aprovada') ? `
+                            ${!isActuallyCompleted && canApprove && normalizedStatus === 'approved' ? `
                             <button class="btn-modal btn-primary" style="padding: 6px 12px; font-size: 12px;" onclick="startPendency(${pendency.id})" title="Iniciar"><i class="fas fa-play"></i></button>
                             <button class="btn-modal btn-success" style="padding: 6px 12px; font-size: 12px;" onclick="completePendency(${pendency.id})" title="Concluir"><i class="fas fa-check-circle"></i></button>
                             ` : ''}
-                            ${canApprove && (pendency.status === 'in_progress' || pendency.status === 'Em Andamento') ? `
+                            ${!isActuallyCompleted && canApprove && normalizedStatus === 'in_progress' ? `
                             <button class="btn-modal btn-success" style="padding: 6px 12px; font-size: 12px;" onclick="completePendency(${pendency.id})" title="Concluir"><i class="fas fa-check-circle"></i></button>
                             ` : ''}
                             <button class="btn-modal btn-secondary" style="padding: 6px 12px; font-size: 12px;" onclick="viewPendencyDetails(${pendency.id})" title="Ver detalhes"><i class="fas fa-eye"></i></button>
@@ -13263,6 +13306,7 @@ processDiscordCommand() diretamente.
                 completed: 'Concluída',
                 rejected: 'Rejeitada'
             };
+            const normalizedStatus = normalizePendencyStatusValue(pendency?.status, pendency);
             const createdAt = new Date(pendency.createdAt || pendency.created_at || 0);
             const updatedAt = new Date(pendency.updatedAt || pendency.updated_at || createdAt);
             const dueDate = pendency.dueDate || pendency.due_date;
@@ -13276,7 +13320,7 @@ processDiscordCommand() diretamente.
                             <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center;">
                                 <span class="badge" style="background: ${priorityInfo.bg}; color: white; padding: 6px 16px; border-radius: 6px; font-size: 13px; font-weight: 600;">${priorityInfo.label}</span>
                                 <span class="badge badge-secondary">${typeLabels[pendency.type] || pendency.type}</span>
-                                <span class="badge badge-primary">${statusLabels[pendency.status] || pendency.status}</span>
+                                <span class="badge badge-primary">${statusLabels[normalizedStatus] || normalizedStatus}</span>
                                 ${isFinancialPendencyType(pendency.type) ? '<span class="badge badge-danger">Somente C-Level</span>' : ''}
                             </div>
                         </div>
