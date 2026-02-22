@@ -1974,9 +1974,15 @@
                 <li><a href="#" onclick="showSection('relatorios'); return false;">Relatórios</a></li>
                 <li><a href="regras.html" target="_blank" rel="noopener">📚 Regras</a></li>
             </ul>
-            <button class="btn btn-secondary" onclick="logout()">
-                <i class="fas fa-sign-out-alt"></i> Sair
-            </button>
+            <div style="display: flex; gap: 10px; align-items: center; flex-shrink: 0;">
+                <button class="btn btn-secondary" id="notificationsNavBtn" onclick="openNotificationsModal()" title="Notificações" style="position: relative;">
+                    <i class="fas fa-bell"></i>
+                    <span class="notification-badge hidden" id="notificationsNavBadge">0</span>
+                </button>
+                <button class="btn btn-secondary" onclick="logout()">
+                    <i class="fas fa-sign-out-alt"></i> Sair
+                </button>
+            </div>
         </nav>
 
         <div class="content-card" id="mainContent">
@@ -2511,6 +2517,28 @@
         </div>
     </div>
 
+    <!-- Modal: Notificações -->
+    <div id="notificationsModal" class="modal">
+        <div class="modal-content modal-lg">
+            <span class="close" onclick="closeModal('notificationsModal')">&times;</span>
+            <div class="modal-header">
+                <h2><i class="fas fa-bell"></i> Notificações</h2>
+            </div>
+
+            <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px;">
+                <button class="btn btn-secondary" type="button" onclick="setNotificationsFilter('unread')" id="notifFilterUnread" style="width: auto; padding: 10px 14px;">Não lidas</button>
+                <button class="btn btn-secondary" type="button" onclick="setNotificationsFilter('all')" id="notifFilterAll" style="width: auto; padding: 10px 14px;">Todas</button>
+                <div style="flex: 1;"></div>
+                <button class="btn btn-primary" type="button" onclick="markAllNotificationsRead()" style="width: auto; padding: 10px 14px;">
+                    <i class="fas fa-check-double"></i> Marcar tudo lido
+                </button>
+            </div>
+
+            <div id="notificationsStatus" style="color: var(--gray-text); font-size: 12px; margin-bottom: 10px;"></div>
+            <div id="notificationsList" style="display: flex; flex-direction: column; gap: 10px;"></div>
+        </div>
+    </div>
+
     <!-- Modal: Nova/Editar Card Kanban -->
     <div id="cardModal" class="modal">
         <div class="modal-content" style="max-width: 600px;">
@@ -3010,11 +3038,96 @@
                             refreshGlobalsForKey('txd_pendencies').catch(() => {});
                             renderPendencias();
 
+                            // Notificações in-app (toasts + badge)
+                            // Se o inbox persistente estiver ativo, evitamos duplicar alertas aqui.
+                            if (notificationsSupported !== true) try {
+                                const evt = payload.eventType;
+                                const row = payload.new || payload.old || {};
+                                const pid = row.id;
+                                const userId = row.user_id ?? row.userId;
+
+                                // Nova pendência criada (para DEV/C-Level conforme escopo)
+                                if (evt === 'INSERT') {
+                                    const createdByMe = isCurrentUserId(userId);
+                                    if (!createdByMe) {
+                                        const scope = getPendencyScope(row.type);
+                                        const canSee = isCLevelRole(currentUser?.role) || (scope === 'dev' ? isDevRole(currentUser?.role) : true);
+                                        if (canSee) {
+                                            showToast({
+                                                title: '📋 Nova pendência criada',
+                                                message: `#${pid || '?'} • ${row.title || 'Sem título'}`,
+                                                variant: 'info'
+                                            });
+                                            bumpSectionBadge('pendencias', 1);
+                                        }
+                                    }
+                                }
+
+                                // Alteração na sua pendência
+                                if (evt === 'UPDATE') {
+                                    const isMine = isCurrentUserId(userId);
+                                    const changedByMe = isCurrentUserName(row.approved_by) || isCurrentUserName(row.approvedBy);
+                                    if (isMine && !changedByMe) {
+                                        showToast({
+                                            title: '✏️ Alteração na sua pendência',
+                                            message: `#${pid || '?'} • ${row.title || 'Sem título'}`,
+                                            variant: 'warning'
+                                        });
+                                        bumpSectionBadge('pendencias', 1);
+                                    }
+                                }
+                            } catch (e) {}
+
                             if (currentSection !== 'pendencias' && currentSection !== 'formularios') {
                                 scheduleSectionRefreshForKey('txd_pendencies', 800);
                             }
                         } catch (err) {
                             console.error('[pendencies][realtime] erro:', err, payload);
+                        }
+                    }
+                )
+                .subscribe());
+
+            // Subscription para mensagens do chat de pendências (notificar fora do modal)
+            subscribeRealtimeOnce('pendency_messages_changes', () => supabaseClient
+                .channel('pendency_messages_changes')
+                .on('postgres_changes',
+                    { event: 'INSERT', schema: 'public', table: 'pendency_messages' },
+                    async (payload) => {
+                        try {
+                            if (notificationsSupported === true) return;
+                            const row = payload.new || {};
+                            const pendencyId = row.pendency_id ?? row.pendencyId;
+                            const senderId = row.sender_id ?? row.senderId;
+
+                            if (!pendencyId) return;
+                            if (isCurrentUserId(senderId)) return; // ignora mensagens enviadas por mim
+
+                            if (!state.pendencies.initialized) {
+                                await ensurePendenciesLoaded(false);
+                            }
+
+                            const pendency = state.pendencies.byId.get(String(pendencyId));
+                            if (!pendency) return;
+
+                            const isMine = isCurrentUserId(pendency.userId ?? pendency.user_id);
+                            const isAssigned = isCurrentUserId(pendency.assignedUserId ?? pendency.assigned_user_id);
+                            const canSee = isMine || isAssigned || isCLevelRole(currentUser?.role) || (getEffectivePendencyArea(pendency) === 'dev' && isDevRole(currentUser?.role));
+                            if (!canSee) return;
+
+                            // Se o modal dessa pendência estiver aberto, não precisa toast
+                            const modalOpen = document.getElementById('pendencyDetailsModal')?.classList?.contains('active');
+                            const sameChat = Number(currentPendencyChatId || 0) === Number(pendencyId);
+                            if (modalOpen && sameChat) return;
+
+                            showToast({
+                                title: '💬 Nova mensagem na pendência',
+                                message: `#${pendencyId} • ${(pendency.title || 'Sem título')}`,
+                                variant: 'info'
+                            });
+                            bumpSectionBadge('pendencias', 1);
+                        } catch (e) {
+                            console.warn('[pendency_messages][realtime] erro:', e);
                         }
                     }
                 )
@@ -3152,6 +3265,20 @@
                                 if (name && !existing.some(a => String(a).toLowerCase().trim() === String(name).toLowerCase().trim())) {
                                     state.kanban.assigneesByCardId.set(String(cardId), [...existing, name]);
                                 }
+
+                                // Notificação: nova tarefa atribuída ao usuário atual
+                                // (fallback; quando inbox persistente estiver ativo, isso vira notificação no banco)
+                                if (notificationsSupported !== true) try {
+                                    const mine = isCurrentUserName(name);
+                                    if (payload.eventType === 'INSERT' && mine) {
+                                        showToast({
+                                            title: '✅ Nova tarefa atribuída',
+                                            message: `Card #${cardId}`,
+                                            variant: 'success'
+                                        });
+                                        bumpSectionBadge('tarefas', 1);
+                                    }
+                                } catch (e) {}
                             }
 
                             refreshGlobalsForKey('txd_kanban').catch(() => {});
@@ -3223,6 +3350,9 @@
             
             realtimeInitialized = true;
             console.log('✅ Real-time inicializado com sucesso!');
+
+            // Garantir que inbox de notificações (se existir) tenha subscriptions após resetRealtimeSubscriptions()
+            initializeNotificationsSystem().catch(() => {});
         }
         
         // Mapeamento de chaves internas para tabelas Supabase
@@ -4814,6 +4944,16 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         function showSection(section) {
             // Atualizar seção atual para real-time
             currentSection = section;
+
+            // Ao abrir a seção, limpar badges relacionados (notificações in-app)
+            try {
+                if (section === 'pendencias' || section === 'formularios') {
+                    clearSectionBadge('pendencias');
+                }
+                if (section === 'tarefas') {
+                    clearSectionBadge('tarefas');
+                }
+            } catch (e) {}
             
             // Validar permissões antes de exibir a seção
             if (!canAccess(section)) {
@@ -13112,6 +13252,27 @@ processDiscordCommand() diretamente.
                         priority: priority
                     });
 
+                    // Notificação persistente: nova pendência criada (roteada por destino)
+                    if (!pendencyId) {
+                        const audience = destination === 'dev'
+                            ? 'dev'
+                            : (destination === 'clevel' ? 'clevel' : 'all');
+                        createNotification({
+                            type: 'pendency_created',
+                            title: '📋 Nova pendência criada',
+                            body: `#${normalized.id} • ${title}`,
+                            audience,
+                            entityType: 'pendency',
+                            entityId: normalized.id,
+                            metadata: {
+                                actorUserId: getCurrentUserIdString(),
+                                actorName: String(currentUser?.displayName || currentUser?.name || ''),
+                                pendencyUserId: String(payloadBase.user_id || ''),
+                                destination
+                            }
+                        }).catch(() => {});
+                    }
+
                     alert(`✅ Pendência ${pendencyId ? 'atualizada' : 'criada'} com sucesso!`);
                     closeModal('pendencyModal');
                     renderPendencias();
@@ -13180,6 +13341,22 @@ processDiscordCommand() diretamente.
                     { name: '✅ Aprovada por', value: currentUser.name || currentUser.displayName, inline: true }
                 ]);
                 logSystemAction('Pendência aprovada', 'Pendências', { pendencyId });
+
+                // Notificação persistente para o solicitante
+                createNotification({
+                    type: 'pendency_approved',
+                    title: '✅ Pendência aprovada',
+                    body: `#${pendencyId} • ${(directPendency.title || 'Sem título')}`,
+                    audience: 'user',
+                    audienceUserId: directPendency.user_id ?? directPendency.userId ?? null,
+                    entityType: 'pendency',
+                    entityId: pendencyId,
+                    metadata: {
+                        actorUserId: getCurrentUserIdString(),
+                        actorName: String(currentUser?.displayName || currentUser?.name || ''),
+                        status: 'approved'
+                    }
+                }).catch(() => {});
                 alert('✅ Pendência aprovada com sucesso!');
                 renderPendencias();
             } catch (error) {
@@ -13251,6 +13428,22 @@ processDiscordCommand() diretamente.
                     { name: '📝 Motivo', value: reason, inline: false }
                 ]);
                 logSystemAction('Pendência rejeitada', 'Pendências', { pendencyId, reason });
+
+                // Notificação persistente para o solicitante
+                createNotification({
+                    type: 'pendency_rejected',
+                    title: '❌ Pendência rejeitada',
+                    body: `#${pendencyId} • ${(directPendency.title || 'Sem título')}\nMotivo: ${reason}`,
+                    audience: 'user',
+                    audienceUserId: directPendency.user_id ?? directPendency.userId ?? null,
+                    entityType: 'pendency',
+                    entityId: pendencyId,
+                    metadata: {
+                        actorUserId: getCurrentUserIdString(),
+                        actorName: String(currentUser?.displayName || currentUser?.name || ''),
+                        status: 'rejected'
+                    }
+                }).catch(() => {});
                 alert('✅ Pendência rejeitada.');
                 renderPendencias();
             } catch (error) {
@@ -13305,6 +13498,22 @@ processDiscordCommand() diretamente.
                     console.warn('[pendencies] Falha ao atualizar state (start):', e);
                 }
                 logSystemAction('Pendência iniciada', 'Pendências', { pendencyId });
+
+                // Notificação persistente para o solicitante
+                createNotification({
+                    type: 'pendency_in_progress',
+                    title: '⏳ Pendência em andamento',
+                    body: `#${pendencyId} • ${(directPendency.title || 'Sem título')}`,
+                    audience: 'user',
+                    audienceUserId: directPendency.user_id ?? directPendency.userId ?? null,
+                    entityType: 'pendency',
+                    entityId: pendencyId,
+                    metadata: {
+                        actorUserId: getCurrentUserIdString(),
+                        actorName: String(currentUser?.displayName || currentUser?.name || ''),
+                        status: 'in_progress'
+                    }
+                }).catch(() => {});
                 alert('✅ Pendência iniciada!');
                 renderPendencias();
             } catch (error) {
@@ -13403,6 +13612,22 @@ processDiscordCommand() diretamente.
                     { name: '✅ Concluída por', value: currentUser.name || currentUser.displayName, inline: true }
                 ]);
                 logSystemAction('Pendência concluída', 'Pendências', { pendencyId });
+
+                // Notificação persistente para o solicitante
+                createNotification({
+                    type: 'pendency_completed',
+                    title: '✅ Pendência concluída',
+                    body: `#${pendencyId} • ${(directPendency.title || 'Sem título')}`,
+                    audience: 'user',
+                    audienceUserId: directPendency.user_id ?? directPendency.userId ?? null,
+                    entityType: 'pendency',
+                    entityId: pendencyId,
+                    metadata: {
+                        actorUserId: getCurrentUserIdString(),
+                        actorName: String(currentUser?.displayName || currentUser?.name || ''),
+                        status: 'completed'
+                    }
+                }).catch(() => {});
                 alert('✅ Pendência marcada como concluída!');
                 renderPendencias();
             } catch (error) {
@@ -13741,6 +13966,72 @@ processDiscordCommand() diretamente.
                     }
                     return;
                 }
+
+                // Notificação persistente (se o inbox existir)
+                try {
+                    if (notificationsSupported === null) await detectNotificationsSupport();
+                    if (notificationsSupported === true) {
+                        await ensurePendenciesLoaded(false);
+                        const pendency = state.pendencies.byId.get(String(pid));
+                        const pendencyUserId = pendency?.userId ?? pendency?.user_id ?? null;
+                        const assignedUserId = pendency?.assignedUserId ?? pendency?.assigned_user_id ?? null;
+                        const isOwner = isSameUserId(pendencyUserId, getCurrentUserIdString());
+                        const msgPreview = text.length > 140 ? (text.slice(0, 140) + '…') : text;
+
+                        if (!isOwner && pendencyUserId) {
+                            // Staff -> avisar solicitante
+                            createNotification({
+                                type: 'pendency_message',
+                                title: '💬 Nova mensagem na sua pendência',
+                                body: `#${pid} • ${(pendency?.title || 'Sem título')}\n${msgPreview}`,
+                                audience: 'user',
+                                audienceUserId: pendencyUserId,
+                                entityType: 'pendency',
+                                entityId: pid,
+                                metadata: {
+                                    actorUserId: getCurrentUserIdString(),
+                                    actorName: String(currentUser?.displayName || currentUser?.name || ''),
+                                    sender: getPendencyChatSenderLabel()
+                                }
+                            }).catch(() => {});
+                        } else {
+                            // Solicitante -> avisar time responsável (ou usuário atribuído)
+                            if (assignedUserId && !isSameUserId(assignedUserId, getCurrentUserIdString())) {
+                                createNotification({
+                                    type: 'pendency_message',
+                                    title: '💬 Nova mensagem em pendência atribuída',
+                                    body: `#${pid} • ${(pendency?.title || 'Sem título')}\n${msgPreview}`,
+                                    audience: 'user',
+                                    audienceUserId: assignedUserId,
+                                    entityType: 'pendency',
+                                    entityId: pid,
+                                    metadata: {
+                                        actorUserId: getCurrentUserIdString(),
+                                        actorName: String(currentUser?.displayName || currentUser?.name || ''),
+                                        sender: getPendencyChatSenderLabel()
+                                    }
+                                }).catch(() => {});
+                            } else {
+                                const dest = getEffectivePendencyArea(pendency);
+                                const audience = dest === 'dev' ? 'dev' : (dest === 'clevel' ? 'clevel' : 'all');
+                                createNotification({
+                                    type: 'pendency_message',
+                                    title: '💬 Nova mensagem em pendência',
+                                    body: `#${pid} • ${(pendency?.title || 'Sem título')}\n${msgPreview}`,
+                                    audience,
+                                    entityType: 'pendency',
+                                    entityId: pid,
+                                    metadata: {
+                                        actorUserId: getCurrentUserIdString(),
+                                        actorName: String(currentUser?.displayName || currentUser?.name || ''),
+                                        sender: getPendencyChatSenderLabel(),
+                                        destination: dest
+                                    }
+                                }).catch(() => {});
+                            }
+                        }
+                    }
+                } catch (e) {}
 
                 input.value = '';
                 if (statusEl) statusEl.textContent = '';
@@ -14115,6 +14406,8 @@ processDiscordCommand() diretamente.
             const id = Number(cardData?.id);
             if (!id) throw new Error('ID inválido para tarefa');
 
+            const previousAssignees = state.kanban.assigneesByCardId.get(String(id)) || [];
+
             const assignees = Array.isArray(cardData.assignees)
                 ? cardData.assignees
                 : (cardData.assignee ? [cardData.assignee] : []);
@@ -14167,6 +14460,47 @@ processDiscordCommand() diretamente.
             upsertItem(state.kanban.cardsById, normalized);
             state.kanban.assigneesByCardId.set(String(id), uniqueAssignees);
             clearCacheKey('txd_kanban');
+
+            // Notificação persistente: nova tarefa atribuída (apenas novos assignees)
+            try {
+                if (notificationsSupported === null) await detectNotificationsSupport();
+                if (notificationsSupported === true) {
+                    const prev = Array.isArray(previousAssignees) ? previousAssignees : [];
+                    const isSame = (a, b) => normalizeText(a) === normalizeText(b);
+                    const newlyAssigned = uniqueAssignees.filter(name => !prev.some(p => isSame(p, name)));
+
+                    const staffArray = Array.isArray(staffData) ? staffData : [];
+                    for (const assigneeName of newlyAssigned) {
+                        const staffMatch = staffArray.find(s => {
+                            const candidates = [
+                                s?.displayName,
+                                s?.name,
+                                s?.login
+                            ].map(v => normalizeText(v)).filter(Boolean);
+                            const target = normalizeText(assigneeName);
+                            return target && candidates.includes(target);
+                        });
+                        const targetUserId = staffMatch?.id;
+                        if (!targetUserId) continue;
+                        if (isSameUserId(targetUserId, getCurrentUserIdString())) continue;
+
+                        createNotification({
+                            type: 'task_assigned',
+                            title: '✅ Nova tarefa atribuída',
+                            body: `#${id} • ${(normalized.title || 'Sem título')}`,
+                            audience: 'user',
+                            audienceUserId: String(targetUserId),
+                            entityType: 'task',
+                            entityId: id,
+                            metadata: {
+                                actorUserId: getCurrentUserIdString(),
+                                actorName: String(currentUser?.displayName || currentUser?.name || ''),
+                                assigneeName: String(assigneeName)
+                            }
+                        }).catch(() => {});
+                    }
+                }
+            } catch (e) {}
 
             return normalized;
         }
@@ -14697,6 +15031,9 @@ processDiscordCommand() diretamente.
                 if (!realtimeInitialized && supabaseClient) {
                     initializeRealtime();
                 }
+
+                // Inicializar inbox de notificações (se existir no Supabase)
+                initializeNotificationsSystem().catch(() => {});
             } catch (error) {
                 console.error('Erro ao atualizar dados:', error);
             }
@@ -14729,6 +15066,578 @@ processDiscordCommand() diretamente.
                     chatLink.appendChild(badge);
                 }
             }
+        }
+
+        // ========== NOTIFICAÇÕES PERSISTENTES (INBOX) ==========
+
+        let notificationsSupported = null; // null = desconhecido, true/false após detecção
+        let notificationsFilterMode = 'unread'; // unread | all
+        let notificationsCache = [];
+        let notificationsReadSet = new Set();
+        let notificationsInitialized = false;
+
+        function getCurrentUserIdString() {
+            const v = currentUser?.id;
+            if (v === undefined || v === null) return '';
+            return String(v).trim();
+        }
+
+        function isSameUserId(a, b) {
+            const sa = (a === undefined || a === null) ? '' : String(a).trim();
+            const sb = (b === undefined || b === null) ? '' : String(b).trim();
+            return !!(sa && sb && sa === sb);
+        }
+
+        function notificationAppliesToCurrentUser(notification) {
+            if (!notification || !currentUser) return false;
+            const audience = normalizeText(notification.audience || 'all');
+            const userId = getCurrentUserIdString();
+
+            if (audience === 'all' || audience === '*' || audience === 'staff') return true;
+            if (audience === 'dev') return isDevRole(currentUser?.role) || isCLevelRole(currentUser?.role);
+            if (audience === 'clevel' || audience === 'c_level') return isCLevelRole(currentUser?.role);
+            if (audience === 'user') return userId && isSameUserId(notification.audienceUserId ?? notification.audience_user_id, userId);
+            return false;
+        }
+
+        async function detectNotificationsSupport() {
+            if (!supabaseClient) {
+                notificationsSupported = false;
+                return false;
+            }
+            try {
+                const { error } = await supabaseClient
+                    .from('notifications')
+                    .select('id')
+                    .limit(1);
+                if (error) {
+                    const msg = normalizeText(error.message);
+                    if (msg.includes('relation') || msg.includes('does not exist') || msg.includes('notifications')) {
+                        notificationsSupported = false;
+                        return false;
+                    }
+                    // Outros erros: considerar suportado, mas logar.
+                    console.warn('[notifications] erro ao detectar suporte:', error);
+                }
+                notificationsSupported = true;
+                return true;
+            } catch (e) {
+                notificationsSupported = false;
+                return false;
+            }
+        }
+
+        async function createNotification({
+            type,
+            title,
+            body = '',
+            audience = 'all',
+            audienceUserId = null,
+            entityType = null,
+            entityId = null,
+            metadata = {}
+        } = {}) {
+            if (!supabaseClient) return null;
+            if (!type || !title) return null;
+
+            if (notificationsSupported === null) {
+                await detectNotificationsSupport();
+            }
+            if (notificationsSupported === false) return null;
+
+            const row = {
+                type: String(type),
+                title: String(title),
+                body: body ? String(body) : null,
+                audience: String(audience || 'all'),
+                audience_user_id: (audienceUserId !== undefined && audienceUserId !== null && String(audienceUserId).trim() !== '')
+                    ? String(audienceUserId)
+                    : null,
+                entity_type: entityType ? String(entityType) : null,
+                entity_id: (entityId !== undefined && entityId !== null && String(entityId).trim() !== '') ? String(entityId) : null,
+                metadata: (metadata && typeof metadata === 'object') ? metadata : {}
+            };
+
+            try {
+                const { data, error } = await supabaseClient
+                    .from('notifications')
+                    .insert(row)
+                    .select('*')
+                    .single();
+                if (error) throw error;
+                return toCamelCase(data || {});
+            } catch (e) {
+                const msg = normalizeText(e?.message || '');
+                if (msg.includes('relation') || msg.includes('does not exist') || msg.includes('notifications')) {
+                    notificationsSupported = false;
+                }
+                console.warn('[notifications] falha ao criar:', e);
+                return null;
+            }
+        }
+
+        async function loadNotificationsForCurrentUser(limit = 120) {
+            if (!supabaseClient || !currentUser) return [];
+            if (notificationsSupported === null) await detectNotificationsSupport();
+            if (notificationsSupported === false) return [];
+
+            const safeLimit = Math.max(10, Math.min(Number(limit) || 120, 300));
+
+            const { data, error } = await supabaseClient
+                .from('notifications')
+                .select('*')
+                .order('created_at', { ascending: false })
+                .limit(safeLimit);
+
+            if (error) throw error;
+
+            const all = toCamelCase(data || []);
+            return all.filter(notificationAppliesToCurrentUser);
+        }
+
+        async function loadNotificationReadsForCurrentUser(notificationIds = []) {
+            if (!supabaseClient || !currentUser) return new Set();
+            if (!Array.isArray(notificationIds) || notificationIds.length === 0) return new Set();
+            const userId = getCurrentUserIdString();
+            if (!userId) return new Set();
+
+            const ids = notificationIds.map(id => Number(id)).filter(n => Number.isFinite(n) && n > 0);
+            if (ids.length === 0) return new Set();
+
+            try {
+                const { data, error } = await supabaseClient
+                    .from('notification_reads')
+                    .select('notification_id')
+                    .eq('user_id', userId)
+                    .in('notification_id', ids);
+                if (error) throw error;
+
+                const set = new Set();
+                (data || []).forEach(r => {
+                    const nid = r.notification_id ?? r.notificationId;
+                    if (nid) set.add(Number(nid));
+                });
+                return set;
+            } catch (e) {
+                console.warn('[notifications] falha ao carregar reads:', e);
+                return new Set();
+            }
+        }
+
+        function getUnreadNotificationsCount() {
+            const list = Array.isArray(notificationsCache) ? notificationsCache : [];
+            let count = 0;
+            for (const n of list) {
+                const id = Number(n?.id);
+                if (id && !notificationsReadSet.has(id)) count++;
+            }
+            return count;
+        }
+
+        function updateNotificationsNavBadge() {
+            const badge = document.getElementById('notificationsNavBadge');
+            if (!badge) return;
+
+            const unread = getUnreadNotificationsCount();
+            if (unread > 0) {
+                badge.textContent = unread > 99 ? '99+' : String(unread);
+                badge.classList.remove('hidden');
+            } else {
+                badge.textContent = '0';
+                badge.classList.add('hidden');
+            }
+        }
+
+        function setNotificationsFilter(mode) {
+            const m = (mode === 'all') ? 'all' : 'unread';
+            notificationsFilterMode = m;
+
+            const bUnread = document.getElementById('notifFilterUnread');
+            const bAll = document.getElementById('notifFilterAll');
+            if (bUnread && bAll) {
+                // Alternar visual usando as classes existentes
+                bUnread.classList.toggle('btn-primary', m === 'unread');
+                bUnread.classList.toggle('btn-secondary', m !== 'unread');
+                bAll.classList.toggle('btn-primary', m === 'all');
+                bAll.classList.toggle('btn-secondary', m !== 'all');
+            }
+
+            renderNotificationsList();
+        }
+
+        function renderNotificationsList() {
+            const listEl = document.getElementById('notificationsList');
+            const statusEl = document.getElementById('notificationsStatus');
+            if (!listEl) return;
+
+            const list = Array.isArray(notificationsCache) ? notificationsCache : [];
+            const filtered = notificationsFilterMode === 'all'
+                ? list
+                : list.filter(n => {
+                    const id = Number(n?.id);
+                    return id && !notificationsReadSet.has(id);
+                });
+
+            if (statusEl) {
+                const unread = getUnreadNotificationsCount();
+                statusEl.textContent = notificationsSupported === false
+                    ? 'Tabela de notificações não existe ainda. Execute o SQL de criação (criar_tabela_notifications.sql) no Supabase.'
+                    : `${unread} não lida(s) • ${list.length} total`;
+            }
+
+            if (filtered.length === 0) {
+                listEl.innerHTML = `<div style="color: var(--gray-text); font-size: 13px; padding: 14px; border: 1px dashed var(--gray-border); border-radius: 12px; background: var(--black-dark);">Sem notificações aqui.</div>`;
+                return;
+            }
+
+            listEl.innerHTML = filtered.map(n => {
+                const id = Number(n.id);
+                const isRead = notificationsReadSet.has(id);
+                const title = escapeHtml((n.title || '').toString());
+                const body = escapeHtml((n.body || '').toString());
+                const createdAt = (() => {
+                    try { return n.createdAt ? new Date(n.createdAt).toLocaleString('pt-BR') : ''; } catch (e) { return ''; }
+                })();
+                const badge = isRead ? '' : `<span style="background: rgba(0,255,136,0.18); color: var(--success); border: 1px solid rgba(0,255,136,0.25); padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 800;">NOVA</span>`;
+                const meta = `${escapeHtml(createdAt)}${n.type ? ` • ${escapeHtml(String(n.type))}` : ''}`;
+
+                return `
+                    <div style="background: var(--gray-medium); border: 1px solid ${isRead ? 'var(--gray-border)' : 'rgba(0,255,136,0.35)'}; border-radius: 14px; padding: 14px; cursor: pointer;" onclick="openNotificationItem(${id})">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                            <div style="color: var(--white-soft); font-weight: 800; font-size: 14px;">${title}</div>
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                ${badge}
+                                <button type="button" class="btn btn-secondary" style="width: auto; padding: 8px 10px; font-size: 12px;" onclick="event.stopPropagation(); markNotificationRead(${id});">
+                                    <i class="fas fa-check"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div style="color: var(--gray-light); font-size: 12px; margin-top: 6px;">${meta}</div>
+                        ${body ? `<div style="color: var(--white-soft); font-size: 13px; margin-top: 10px; white-space: pre-wrap; line-height: 1.45;">${body}</div>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function refreshNotifications({ render = false } = {}) {
+            if (!currentUser || !supabaseClient) return;
+
+            try {
+                if (notificationsSupported === null) await detectNotificationsSupport();
+                if (notificationsSupported === false) {
+                    notificationsCache = [];
+                    notificationsReadSet = new Set();
+                    updateNotificationsNavBadge();
+                    if (render) renderNotificationsList();
+                    return;
+                }
+
+                const list = await loadNotificationsForCurrentUser(140);
+                notificationsCache = list;
+                notificationsReadSet = await loadNotificationReadsForCurrentUser(list.map(n => n.id));
+                updateNotificationsNavBadge();
+                if (render) renderNotificationsList();
+
+                notificationsInitialized = true;
+            } catch (e) {
+                console.warn('[notifications] falha ao atualizar:', e);
+            }
+        }
+
+        function openNotificationsModal() {
+            // Sempre começa com "Não lidas"
+            setNotificationsFilter('unread');
+            document.getElementById('notificationsModal')?.classList?.add('active');
+            refreshNotifications({ render: true }).catch(() => {});
+        }
+
+        async function markNotificationRead(notificationId) {
+            if (!supabaseClient || !currentUser) return;
+            if (notificationsSupported === null) await detectNotificationsSupport();
+            if (notificationsSupported === false) return;
+
+            const nid = Number(notificationId);
+            if (!nid) return;
+
+            const userId = getCurrentUserIdString();
+            if (!userId) return;
+
+            try {
+                const { error } = await supabaseClient
+                    .from('notification_reads')
+                    .upsert(
+                        { notification_id: nid, user_id: userId, read_at: new Date().toISOString() },
+                        { onConflict: 'notification_id,user_id' }
+                    );
+                if (error) throw error;
+                notificationsReadSet.add(nid);
+                updateNotificationsNavBadge();
+                renderNotificationsList();
+            } catch (e) {
+                console.warn('[notifications] falha ao marcar lida:', e);
+            }
+        }
+
+        async function markAllNotificationsRead() {
+            if (!supabaseClient || !currentUser) return;
+            if (notificationsSupported === null) await detectNotificationsSupport();
+            if (notificationsSupported === false) return;
+
+            const userId = getCurrentUserIdString();
+            if (!userId) return;
+
+            const unreadIds = (Array.isArray(notificationsCache) ? notificationsCache : [])
+                .map(n => Number(n?.id))
+                .filter(id => id && !notificationsReadSet.has(id));
+            if (unreadIds.length === 0) return;
+
+            try {
+                const rows = unreadIds.map(id => ({
+                    notification_id: id,
+                    user_id: userId,
+                    read_at: new Date().toISOString()
+                }));
+                const { error } = await supabaseClient
+                    .from('notification_reads')
+                    .upsert(rows, { onConflict: 'notification_id,user_id' });
+                if (error) throw error;
+
+                unreadIds.forEach(id => notificationsReadSet.add(id));
+                updateNotificationsNavBadge();
+                renderNotificationsList();
+            } catch (e) {
+                console.warn('[notifications] falha ao marcar tudo lido:', e);
+            }
+        }
+
+        function openNotificationItem(notificationId) {
+            const nid = Number(notificationId);
+            if (!nid) return;
+            const notif = (Array.isArray(notificationsCache) ? notificationsCache : []).find(n => Number(n?.id) === nid);
+            if (!notif) return;
+
+            // Marcar como lido ao abrir
+            if (!notificationsReadSet.has(nid)) {
+                markNotificationRead(nid).catch(() => {});
+            }
+
+            // Navegação básica por entidade
+            const type = normalizeText(notif.entityType || notif.entity_type || '');
+            const eid = String(notif.entityId || notif.entity_id || '').trim();
+            if (type === 'pendency' && eid) {
+                try { closeModal('notificationsModal'); } catch (e) {}
+                showSection('pendencias');
+                setTimeout(() => {
+                    try { viewPendencyDetails(Number(eid)); } catch (e) {}
+                }, 250);
+                return;
+            }
+            if (type === 'kanban' || type === 'kanban_card' || type === 'task') {
+                try { closeModal('notificationsModal'); } catch (e) {}
+                showSection('tarefas');
+            }
+        }
+
+        function ensureNotificationsRealtime() {
+            if (!supabaseClient) return;
+            if (notificationsSupported !== true) return;
+            if (realtimeChannelsByName?.has?.('notifications_changes')) return;
+
+            // Novas notificações
+            subscribeRealtimeOnce('notifications_changes', () => supabaseClient
+                .channel('notifications_changes')
+                .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications' }, (payload) => {
+                    try {
+                        const n = toCamelCase(payload.new || {});
+                        if (!notificationAppliesToCurrentUser(n)) return;
+
+                        // Ignorar toast quando fui eu quem gerou
+                        const actorId = n?.metadata?.actorUserId ?? n?.metadata?.actor_user_id ?? null;
+                        if (!isSameUserId(actorId, getCurrentUserIdString())) {
+                            showToast({
+                                title: n.title || 'Nova notificação',
+                                message: n.body || '',
+                                variant: 'info'
+                            });
+                        }
+
+                        // Atualizar cache rápido (evita refetch imediato)
+                        notificationsCache = [n, ...(Array.isArray(notificationsCache) ? notificationsCache : [])].slice(0, 200);
+                        updateNotificationsNavBadge();
+                        if (document.getElementById('notificationsModal')?.classList?.contains('active')) {
+                            refreshNotifications({ render: true }).catch(() => {});
+                        }
+
+                        // Badges de seção (opcional)
+                        const t = normalizeText(n.type || '');
+                        if (t.startsWith('pendency')) bumpSectionBadge('pendencias', 1);
+                        if (t.startsWith('task')) bumpSectionBadge('tarefas', 1);
+                    } catch (e) {
+                        console.warn('[notifications][realtime] erro:', e);
+                    }
+                })
+                .subscribe());
+
+            // Leituras (para sincronizar múltiplas abas do mesmo user)
+            subscribeRealtimeOnce('notification_reads_changes', () => supabaseClient
+                .channel('notification_reads_changes')
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'notification_reads' }, (payload) => {
+                    try {
+                        const row = toCamelCase(payload.new || payload.old || {});
+                        const userId = row.userId ?? row.user_id;
+                        if (!isSameUserId(userId, getCurrentUserIdString())) return;
+
+                        const nid = Number(row.notificationId ?? row.notification_id);
+                        if (nid) notificationsReadSet.add(nid);
+                        updateNotificationsNavBadge();
+                        if (document.getElementById('notificationsModal')?.classList?.contains('active')) {
+                            renderNotificationsList();
+                        }
+                    } catch (e) {}
+                })
+                .subscribe());
+        }
+
+        async function initializeNotificationsSystem() {
+            if (notificationsInitialized) {
+                if (notificationsSupported === null) await detectNotificationsSupport();
+                if (notificationsSupported) ensureNotificationsRealtime();
+                return;
+            }
+            if (!currentUser || !supabaseClient) return;
+            await detectNotificationsSupport();
+            if (notificationsSupported) {
+                ensureNotificationsRealtime();
+                await refreshNotifications({ render: false });
+            } else {
+                updateNotificationsNavBadge();
+            }
+            notificationsInitialized = true;
+        }
+
+        // ========== NOTIFICAÇÕES IN-APP (BADGES + TOASTS) ==========
+
+        const sectionBadges = {
+            pendencias: 0,
+            tarefas: 0
+        };
+
+        function normalizeText(value) {
+            return (value ?? '').toString().trim().toLowerCase();
+        }
+
+        function ensureToastContainer() {
+            let container = document.getElementById('toastContainer');
+            if (container) return container;
+
+            container = document.createElement('div');
+            container.id = 'toastContainer';
+            container.style.position = 'fixed';
+            container.style.top = '16px';
+            container.style.right = '16px';
+            container.style.zIndex = '3000';
+            container.style.display = 'flex';
+            container.style.flexDirection = 'column';
+            container.style.gap = '10px';
+            container.style.maxWidth = '360px';
+            document.body.appendChild(container);
+            return container;
+        }
+
+        function showToast({ title, message, variant = 'info', timeoutMs = 4500 } = {}) {
+            try {
+                const container = ensureToastContainer();
+
+                const variantMeta = {
+                    info: { border: 'rgba(207,207,207,0.25)' },
+                    success: { border: 'rgba(0,255,136,0.35)' },
+                    warning: { border: 'rgba(255,170,0,0.35)' },
+                    danger: { border: 'rgba(255,51,102,0.35)' }
+                };
+
+                const meta = variantMeta[variant] || variantMeta.info;
+
+                const toast = document.createElement('div');
+                toast.style.background = 'rgba(26, 27, 29, 0.92)';
+                toast.style.backdropFilter = 'blur(18px)';
+                toast.style.border = `1px solid ${meta.border}`;
+                toast.style.borderRadius = '14px';
+                toast.style.padding = '12px 14px';
+                toast.style.boxShadow = '0 10px 26px rgba(0,0,0,0.35)';
+                toast.style.cursor = 'pointer';
+
+                const t = document.createElement('div');
+                t.style.color = 'var(--white-soft)';
+                t.style.fontWeight = '700';
+                t.style.fontSize = '13px';
+                t.style.marginBottom = message ? '4px' : '0';
+                t.textContent = (title || '').toString();
+
+                const m = document.createElement('div');
+                m.style.color = 'var(--gray-light)';
+                m.style.fontSize = '12px';
+                m.style.lineHeight = '1.35';
+                m.textContent = (message || '').toString();
+
+                if (title) toast.appendChild(t);
+                if (message) toast.appendChild(m);
+
+                const remove = () => {
+                    try { toast.remove(); } catch (e) {}
+                };
+
+                toast.addEventListener('click', remove);
+                container.appendChild(toast);
+
+                setTimeout(remove, timeoutMs);
+            } catch (e) {
+                // Silenciar falhas de toast
+            }
+        }
+
+        function setNavBadgeForSection(section, count) {
+            const sectionName = String(section || '').trim();
+            const n = Number(count || 0);
+            const link = document.querySelector(`.nav-menu li a[onclick*="showSection('${sectionName}')"]`);
+            if (!link) return;
+
+            const existingBadge = link.querySelector('.notification-badge');
+            if (existingBadge) existingBadge.remove();
+
+            if (n > 0) {
+                const badge = document.createElement('span');
+                badge.className = 'notification-badge';
+                badge.textContent = n > 99 ? '99+' : String(n);
+                link.style.position = 'relative';
+                link.appendChild(badge);
+            }
+        }
+
+        function bumpSectionBadge(section, delta = 1) {
+            const key = String(section || '').trim();
+            if (!Object.prototype.hasOwnProperty.call(sectionBadges, key)) return;
+            sectionBadges[key] = Math.max(0, Number(sectionBadges[key] || 0) + Number(delta || 0));
+            setNavBadgeForSection(key, sectionBadges[key]);
+        }
+
+        function clearSectionBadge(section) {
+            const key = String(section || '').trim();
+            if (!Object.prototype.hasOwnProperty.call(sectionBadges, key)) return;
+            sectionBadges[key] = 0;
+            setNavBadgeForSection(key, 0);
+        }
+
+        function isCurrentUserId(value) {
+            const me = String(currentUser?.id ?? '');
+            const v = String(value ?? '');
+            return !!(me && v && me === v);
+        }
+
+        function isCurrentUserName(value) {
+            const v = normalizeText(value);
+            const a = normalizeText(currentUser?.name);
+            const b = normalizeText(currentUser?.displayName);
+            return !!(v && (v === a || v === b));
         }
 
         // ========== ISSUE TRACKER (SUPABASE) ==========
