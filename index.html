@@ -4556,6 +4556,11 @@
 
         function closeModal(modalId) {
             document.getElementById(modalId).classList.remove('active');
+
+            // Cleanup específico por modal
+            if (modalId === 'pendencyDetailsModal') {
+                try { teardownPendencyChat(); } catch (e) {}
+            }
         }
 
         // ========== SISTEMA DE REGISTRO E APROVAÇÃO ==========
@@ -13501,10 +13506,255 @@ processDiscordCommand() diretamente.
                         <div style="font-size: 14px; color: var(--white-soft); line-height: 1.6; white-space: pre-wrap;">${pendency.response}</div>
                     </div>
                     ` : ''}
+
+                    <div style="margin-top: 24px;">
+                        <h4 style="color: var(--white-soft); font-size: 16px; margin-bottom: 12px;">
+                            <i class="fas fa-comments" style="color: var(--gray-very-light); margin-right: 8px;"></i>
+                            Chat da Pendência
+                        </h4>
+                        <div id="pendencyChatStatus" style="color: var(--gray-text); font-size: 12px; margin-bottom: 10px;"></div>
+                        <div id="pendencyChatMessages"
+                             style="background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 12px; padding: 12px; max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;">
+                        </div>
+                        <form id="pendencyChatForm" onsubmit="sendPendencyChatMessage(event, ${pendency.id})" style="display: flex; gap: 10px; margin-top: 12px;">
+                            <input id="pendencyChatInput"
+                                   type="text"
+                                   placeholder="Digite uma mensagem…"
+                                   style="flex: 1; padding: 12px 14px; background: var(--gray-dark); border: 1px solid var(--gray-border); border-radius: 12px; color: var(--white-soft); font-size: 14px;"
+                                   autocomplete="off" />
+                            <button type="submit" class="btn btn-primary" style="width: auto; padding: 12px 18px; border-radius: 12px;">
+                                <i class="fas fa-paper-plane"></i> Enviar
+                            </button>
+                        </form>
+                        <div style="color: var(--gray-text); font-size: 11px; margin-top: 8px;">
+                            Visível para quem tem acesso a esta pendência.
+                        </div>
+                    </div>
                 </div>
             `;
             document.getElementById('pendencyDetailsContent').innerHTML = content;
             document.getElementById('pendencyDetailsModal').classList.add('active');
+
+            // Inicializar mini-chat da pendência
+            setupPendencyChat(pendency.id);
+        }
+
+        // ========== MINI-CHAT POR PENDÊNCIA ==========
+
+        let pendencyChatChannel = null;
+        let currentPendencyChatId = null;
+
+        function teardownPendencyChat() {
+            currentPendencyChatId = null;
+            const statusEl = document.getElementById('pendencyChatStatus');
+            const messagesEl = document.getElementById('pendencyChatMessages');
+            if (statusEl) statusEl.textContent = '';
+            if (messagesEl) messagesEl.innerHTML = '';
+
+            if (supabaseClient && pendencyChatChannel) {
+                try { supabaseClient.removeChannel(pendencyChatChannel); } catch (e) {}
+            }
+            pendencyChatChannel = null;
+        }
+
+        function getPendencyChatSenderLabel() {
+            const name = (currentUser?.displayName || currentUser?.name || 'Usuário').toString();
+            const role = (currentUser?.role || '').toString();
+            return role ? `${name} (${role})` : name;
+        }
+
+        function isMyChatMessage(msg) {
+            const myId = String(currentUser?.id ?? '');
+            const msgId = String(msg?.senderId ?? msg?.sender_id ?? '');
+            if (myId && msgId && myId === msgId) return true;
+
+            const myName = (currentUser?.name || currentUser?.displayName || '').toString().trim().toLowerCase();
+            const senderName = (msg?.senderName || msg?.sender_name || '').toString().trim().toLowerCase();
+            return !!(myName && senderName && myName === senderName);
+        }
+
+        function renderPendencyChatMessages(messages) {
+            const messagesEl = document.getElementById('pendencyChatMessages');
+            if (!messagesEl) return;
+
+            const list = Array.isArray(messages) ? messages : [];
+            messagesEl.innerHTML = list.map(m => {
+                const mine = isMyChatMessage(m);
+                const sender = escapeHtml(m.senderName || m.sender_name || 'Usuário');
+                const text = escapeHtml(m.message || '');
+                const time = (() => {
+                    const v = m.createdAt || m.created_at;
+                    try { return v ? new Date(v).toLocaleString('pt-BR') : ''; } catch (e) { return ''; }
+                })();
+
+                return `
+                    <div style="display: flex; flex-direction: column; align-items: ${mine ? 'flex-end' : 'flex-start'}; gap: 4px;">
+                        <div style="font-size: 11px; color: var(--gray-text); padding: 0 6px;">
+                            ${sender}${time ? ` • ${escapeHtml(time)}` : ''}
+                        </div>
+                        <div style="max-width: 80%; background: ${mine ? 'rgba(207, 207, 207, 0.15)' : 'var(--gray-medium)'}; border: 1px solid ${mine ? 'rgba(207, 207, 207, 0.30)' : 'var(--gray-border)'}; color: var(--white-soft); padding: 10px 12px; border-radius: 14px; line-height: 1.4; white-space: pre-wrap; word-break: break-word;">
+                            ${text}
+                        </div>
+                    </div>
+                `;
+            }).join('') || `<div style="color: var(--gray-text); font-size: 13px; padding: 8px;">Nenhuma mensagem ainda.</div>`;
+
+            // Scroll para o final
+            try { messagesEl.scrollTop = messagesEl.scrollHeight; } catch (e) {}
+        }
+
+        async function loadPendencyChatMessages(pendencyId) {
+            const statusEl = document.getElementById('pendencyChatStatus');
+            if (statusEl) statusEl.textContent = 'Carregando chat…';
+
+            if (!supabaseClient) {
+                if (statusEl) statusEl.textContent = 'Supabase indisponível. Chat não está disponível.';
+                renderPendencyChatMessages([]);
+                return [];
+            }
+
+            const pid = Number(pendencyId);
+            if (!pid) {
+                if (statusEl) statusEl.textContent = 'ID da pendência inválido.';
+                renderPendencyChatMessages([]);
+                return [];
+            }
+
+            try {
+                const { data, error } = await supabaseClient
+                    .from('pendency_messages')
+                    .select('*')
+                    .eq('pendency_id', pid)
+                    .order('created_at', { ascending: true });
+
+                if (error) {
+                    // Caso a tabela ainda não exista no Supabase
+                    const msg = (error?.message || '').toString();
+                    if (msg.toLowerCase().includes('relation') || msg.toLowerCase().includes('pendency_messages')) {
+                        if (statusEl) statusEl.textContent = 'Tabela do chat não existe ainda. Execute o SQL de criação (criar_tabela_pendency_messages.sql) no Supabase.';
+                    } else {
+                        if (statusEl) statusEl.textContent = 'Erro ao carregar chat.';
+                    }
+                    console.warn('[pendency_chat] erro ao buscar mensagens:', error);
+                    renderPendencyChatMessages([]);
+                    return [];
+                }
+
+                if (statusEl) statusEl.textContent = '';
+                const msgs = toCamelCase(data || []);
+                renderPendencyChatMessages(msgs);
+                return msgs;
+            } catch (err) {
+                console.warn('[pendency_chat] falha ao buscar mensagens:', err);
+                if (statusEl) statusEl.textContent = 'Erro ao carregar chat.';
+                renderPendencyChatMessages([]);
+                return [];
+            }
+        }
+
+        function subscribePendencyChat(pendencyId) {
+            if (!supabaseClient) return;
+            const pid = Number(pendencyId);
+            if (!pid) return;
+
+            // Remove canal anterior, se existir
+            if (pendencyChatChannel) {
+                try { supabaseClient.removeChannel(pendencyChatChannel); } catch (e) {}
+                pendencyChatChannel = null;
+            }
+
+            // Assinar somente mensagens desta pendência
+            pendencyChatChannel = supabaseClient
+                .channel(`pendency_messages:${pid}`)
+                .on('postgres_changes',
+                    { event: '*', schema: 'public', table: 'pendency_messages', filter: `pendency_id=eq.${pid}` },
+                    () => {
+                        // Recarrega mensagens quando houver mudança (simples e confiável)
+                        loadPendencyChatMessages(pid).catch(() => {});
+                    }
+                )
+                .subscribe();
+        }
+
+        async function setupPendencyChat(pendencyId) {
+            const pid = Number(pendencyId);
+            if (!pid) return;
+
+            if (currentPendencyChatId && Number(currentPendencyChatId) === pid) {
+                return;
+            }
+
+            currentPendencyChatId = pid;
+            await loadPendencyChatMessages(pid);
+            subscribePendencyChat(pid);
+        }
+
+        async function sendPendencyChatMessage(event, pendencyId) {
+            event.preventDefault();
+
+            const statusEl = document.getElementById('pendencyChatStatus');
+            const input = document.getElementById('pendencyChatInput');
+            if (!input) return;
+
+            const text = (input.value || '').toString().trim();
+            if (!text) return;
+
+            if (!currentUser || !currentUser.role) {
+                if (statusEl) statusEl.textContent = 'Você precisa estar logado para enviar mensagens.';
+                return;
+            }
+
+            if (!supabaseClient) {
+                if (statusEl) statusEl.textContent = 'Supabase indisponível. Não foi possível enviar.';
+                return;
+            }
+
+            const pid = Number(pendencyId);
+            if (!pid) {
+                if (statusEl) statusEl.textContent = 'ID da pendência inválido.';
+                return;
+            }
+
+            input.disabled = true;
+            const submitBtn = document.querySelector('#pendencyChatForm button[type="submit"]');
+            if (submitBtn) submitBtn.disabled = true;
+
+            try {
+                const payload = {
+                    pendency_id: pid,
+                    sender_id: String(currentUser?.id ?? ''),
+                    sender_name: getPendencyChatSenderLabel(),
+                    message: text
+                };
+
+                const { error } = await supabaseClient
+                    .from('pendency_messages')
+                    .insert(payload);
+
+                if (error) {
+                    console.warn('[pendency_chat] erro ao enviar:', error);
+                    const msg = (error?.message || '').toString();
+                    if (msg.toLowerCase().includes('relation') || msg.toLowerCase().includes('pendency_messages')) {
+                        if (statusEl) statusEl.textContent = 'Tabela do chat não existe ainda. Execute o SQL de criação (criar_tabela_pendency_messages.sql) no Supabase.';
+                    } else {
+                        if (statusEl) statusEl.textContent = 'Erro ao enviar mensagem.';
+                    }
+                    return;
+                }
+
+                input.value = '';
+                if (statusEl) statusEl.textContent = '';
+
+                // O realtime normalmente atualiza; mas por garantia, recarrega
+                await loadPendencyChatMessages(pid);
+            } catch (err) {
+                console.warn('[pendency_chat] falha ao enviar:', err);
+                if (statusEl) statusEl.textContent = 'Erro ao enviar mensagem.';
+            } finally {
+                input.disabled = false;
+                if (submitBtn) submitBtn.disabled = false;
+                try { input.focus(); } catch (e) {}
+            }
         }
         
         function openAnnouncement() {
