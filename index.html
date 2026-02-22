@@ -1972,6 +1972,7 @@
                 <li><a href="#" onclick="showSection('advertencias'); return false;">Advertências</a></li>
                 <li><a href="#" onclick="showSection('agenda'); return false;">Agenda</a></li>
                 <li><a href="#" onclick="showSection('relatorios'); return false;">Relatórios</a></li>
+                <li><a href="regras.html" target="_blank" rel="noopener">📚 Regras</a></li>
             </ul>
             <button class="btn btn-secondary" onclick="logout()">
                 <i class="fas fa-sign-out-alt"></i> Sair
@@ -2716,6 +2717,95 @@
             realtimeChannelsByName.clear();
         }
 
+        // Invalidação + refresh por chave (para UI atualizar sem precisar recarregar a página)
+        const realtimeRefreshTimers = new Map();
+
+        async function refreshGlobalsForKey(key) {
+            const k = String(key || '');
+            if (!k) return;
+            try {
+                let data;
+
+                // Preferir state em memória quando disponível (evita hits repetidos no banco em mudanças realtime)
+                if (k === 'txd_pendencies' && state?.pendencies?.initialized) {
+                    data = Array.from(state.pendencies.byId.values());
+                    dataCache[k] = data;
+                    cacheTimestamps[k] = Date.now();
+                } else if (k === 'txd_kanban' && state?.kanban?.initialized) {
+                    data = getKanbanSnapshotFromState();
+                    dataCache[k] = data;
+                    cacheTimestamps[k] = Date.now();
+                } else {
+                    data = await getData(k, true);
+                }
+
+                switch (k) {
+                    case 'txd_staff':
+                        staffData = Array.isArray(data) ? data : [];
+                        break;
+                    case 'txd_events':
+                        eventsData = Array.isArray(data) ? data : [];
+                        break;
+                    case 'txd_announcements':
+                        announcementsData = Array.isArray(data) ? data : [];
+                        break;
+                    case 'txd_chat_messages':
+                        chatMessages = Array.isArray(data) ? data : [];
+                        break;
+                    case 'txd_chat_groups':
+                        chatGroups = Array.isArray(data) ? data : [];
+                        break;
+                    case 'txd_commands':
+                        commandsData = Array.isArray(data) ? data : [];
+                        break;
+                    case 'txd_favorite_commands':
+                        favoriteCommands = Array.isArray(data) ? data : [];
+                        break;
+                    case 'txd_command_usage':
+                        commandUsageStats = data || {};
+                        break;
+                    case 'txd_discord_config':
+                        discordConfig = data || getDiscordConfig();
+                        break;
+                }
+            } catch (e) {
+                console.warn('[realtime] falha ao atualizar globals para', k, e);
+            }
+        }
+
+        function scheduleSectionRefreshForKey(key, debounceMs = 250) {
+            const k = String(key || '');
+            if (!k) return;
+
+            const sec = String(currentSection || '');
+            const neededKeys = sectionDataMap?.[sec] || [];
+            if (!Array.isArray(neededKeys) || !neededKeys.includes(k)) return;
+
+            const timerKey = `${sec}:${k}`;
+            if (realtimeRefreshTimers.has(timerKey)) {
+                clearTimeout(realtimeRefreshTimers.get(timerKey));
+            }
+
+            realtimeRefreshTimers.set(timerKey, setTimeout(async () => {
+                try {
+                    await refreshGlobalsForKey(k);
+                } finally {
+                    try {
+                        loadSectionContent(sec);
+                    } catch (e) {
+                        console.warn('[realtime] erro ao recarregar seção', sec, e);
+                    }
+                }
+            }, debounceMs));
+        }
+
+        function invalidateKeyAndRefreshSection(key, debounceMs = 250) {
+            const k = String(key || '');
+            if (!k) return;
+            clearCacheKey(k);
+            scheduleSectionRefreshForKey(k, debounceMs);
+        }
+
         function normalizePendencyRow(row) {
             const p = toCamelCase(row || {});
             // Derivar destino/area de forma compatível (coluna `area` OU metadata em attachments)
@@ -2875,6 +2965,18 @@
             
             // Limpar subscriptions antigas
             resetRealtimeSubscriptions();
+
+            const subscribeKeyInvalidation = (channelName, tableName, key, debounceMs = 450) => {
+                return subscribeRealtimeOnce(channelName, () => supabaseClient
+                    .channel(channelName)
+                    .on('postgres_changes',
+                        { event: '*', schema: 'public', table: tableName },
+                        () => {
+                            invalidateKeyAndRefreshSection(key, debounceMs);
+                        }
+                    )
+                    .subscribe());
+            };
             
             // Subscription para registration_requests
             subscribeRealtimeOnce('registration_requests_changes', () => supabaseClient
@@ -2883,12 +2985,7 @@
                     { event: '*', schema: 'public', table: 'registration_requests' },
                     (payload) => {
                         console.log('Mudança em registration_requests:', payload);
-                        // Limpar cache e recarregar
-                        clearCacheKey('txd_registration_requests');
-                        // Se estiver na seção de controle ou staff, recarregar
-                        if (currentSection === 'controle' || currentSection === 'staff') {
-                            setTimeout(() => loadStaffControl(), 500);
-                        }
+                        invalidateKeyAndRefreshSection('txd_registration_requests', 600);
                     }
                 )
                 .subscribe());
@@ -2901,7 +2998,6 @@
                     (payload) => {
                         try {
                             console.log('[pendencies][realtime]', payload);
-                            clearCacheKey('txd_pendencies');
                             if (payload.eventType === 'DELETE') {
                                 const id = payload.old?.id;
                                 removeItem(state.pendencies.byId, id);
@@ -2909,7 +3005,14 @@
                                 const normalized = normalizePendencyRow(payload.new);
                                 upsertItem(state.pendencies.byId, normalized);
                             }
+
+                            // Atualiza cache em memória (para ranking/conquistas) e só recarrega UI quando necessário
+                            refreshGlobalsForKey('txd_pendencies').catch(() => {});
                             renderPendencias();
+
+                            if (currentSection !== 'pendencias' && currentSection !== 'formularios') {
+                                scheduleSectionRefreshForKey('txd_pendencies', 800);
+                            }
                         } catch (err) {
                             console.error('[pendencies][realtime] erro:', err, payload);
                         }
@@ -2978,7 +3081,13 @@
                                 };
                                 upsertItem(state.kanban.cardsById, normalized);
                             }
+
+                            refreshGlobalsForKey('txd_kanban').catch(() => {});
                             renderTarefas();
+
+                            if (currentSection !== 'tarefas') {
+                                scheduleSectionRefreshForKey('txd_kanban', 900);
+                            }
                         } catch (err) {
                             console.error('[kanban_cards][realtime] erro:', err, payload);
                             reloadKanbanDebounced();
@@ -3001,7 +3110,13 @@
                                 const col = toCamelCase(payload.new || {});
                                 upsertItem(state.kanban.columnsById, { ...col, id: String(col.id) });
                             }
+
+                            refreshGlobalsForKey('txd_kanban').catch(() => {});
                             renderTarefas();
+
+                            if (currentSection !== 'tarefas') {
+                                scheduleSectionRefreshForKey('txd_kanban', 900);
+                            }
                         } catch (err) {
                             console.error('[kanban_columns][realtime] erro:', err, payload);
                             reloadKanbanDebounced();
@@ -3038,7 +3153,13 @@
                                     state.kanban.assigneesByCardId.set(String(cardId), [...existing, name]);
                                 }
                             }
+
+                            refreshGlobalsForKey('txd_kanban').catch(() => {});
                             renderTarefas();
+
+                            if (currentSection !== 'tarefas') {
+                                scheduleSectionRefreshForKey('txd_kanban', 900);
+                            }
                         } catch (err) {
                             console.error('[kanban_assignees][realtime] erro:', err, payload);
                             reloadKanbanDebounced();
@@ -3047,21 +3168,25 @@
                 )
                 .subscribe());
             
-            // Subscription para staff
-            const staffChannel = supabaseClient
-                .channel('staff_changes')
-                .on('postgres_changes',
-                    { event: '*', schema: 'public', table: 'staff' },
-                    (payload) => {
-                        console.log('Mudança em staff:', payload);
-                        clearCacheKey('txd_staff');
-                        if (currentSection === 'staff') {
-                            setTimeout(() => loadStaffControl(), 500);
-                        }
-                    }
-                )
-                .subscribe();
-            realtimeSubscriptions.push(staffChannel);
+            // Subscriptions genéricas (tabelas que alimentam seções e precisam atualizar multiusuário)
+            subscribeKeyInvalidation('staff_changes', 'staff', 'txd_staff', 700);
+            subscribeKeyInvalidation('events_changes', 'events', 'txd_events', 700);
+            subscribeKeyInvalidation('announcements_changes', 'announcements', 'txd_announcements', 700);
+            subscribeKeyInvalidation('warnings_changes', 'warnings', 'txd_warnings', 800);
+            subscribeKeyInvalidation('license_requests_changes', 'license_requests', 'txd_license_requests', 900);
+            subscribeKeyInvalidation('areas_changes', 'areas', 'txd_areas', 900);
+            subscribeKeyInvalidation('area_team_members_changes', 'area_team_members', 'txd_areas', 900);
+            subscribeKeyInvalidation('chat_messages_changes', 'chat_messages', 'txd_chat_messages', 500);
+            subscribeKeyInvalidation('chat_groups_changes', 'chat_groups', 'txd_chat_groups', 700);
+            subscribeKeyInvalidation('chat_group_members_changes', 'chat_group_members', 'txd_chat_groups', 700);
+            subscribeKeyInvalidation('user_achievements_changes', 'user_achievements', 'txd_user_achievements', 900);
+            subscribeKeyInvalidation('commands_changes', 'commands', 'txd_commands', 700);
+            subscribeKeyInvalidation('command_usage_changes', 'command_usage', 'txd_command_usage', 900);
+            subscribeKeyInvalidation('favorite_commands_changes', 'favorite_commands', 'txd_favorite_commands', 900);
+            subscribeKeyInvalidation('discord_config_changes', 'discord_config', 'txd_discord_config', 700);
+            subscribeKeyInvalidation('system_logs_changes', 'system_logs', 'txd_system_logs', 900);
+            subscribeKeyInvalidation('system_settings_changes', 'system_settings', 'txd_system_settings', 900);
+            subscribeKeyInvalidation('security_settings_changes', 'security_settings', 'txd_security_settings', 900);
 
             const issuesChannel = supabaseClient
                 .channel('issues_changes')
@@ -4792,7 +4917,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             'Moderador': ['pendencias', 'moderacao'],
             'Suporte': ['pendencias'],
             'Helper': ['pendencias_basico'],
-            'Dev': ['sistema', 'dev_area']
+            // DEV com acesso total às abas (visualização), além da área DEV
+            'Dev': ['*', 'dev_area']
         };
 
         // Usuário atual (será definido no login)
@@ -4847,6 +4973,12 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             }
 
             const userPermissions = getUserPermissions(currentUser.role);
+
+            // DEV também pode visualizar a seção "Tarefas" (Kanban) sem precisar de permissão "dashboard"
+            // (mantém as regras de criar/editar/excluir controladas por hasPermission('task.*') onde aplicável)
+            if (section === 'tarefas' && (isDevRole(currentUser.role) || userPermissions.includes('dev_area'))) {
+                return true;
+            }
             
             // Obter permissão necessária para a seção
             const requiredPermission = SECTION_PERMISSIONS[section];
