@@ -2841,11 +2841,13 @@
             const area = (p.area || p.destination || meta?.destination || '').toString().toLowerCase().trim();
             const assignedRole = (p.assignedRole || p.assigned_role || meta?.assignedRole || '').toString().toLowerCase().trim();
             const assignedUserId = p.assignedUserId || p.assigned_user_id || meta?.assignedUserId || null;
+            const assignedUserName = p.assignedUserName || p.assigned_user_name || meta?.assignedUserName || meta?.assigned_user_name || meta?.assignedUser || null;
             return {
                 ...p,
                 area: area || null,
                 assignedRole: assignedRole || null,
-                assignedUserId: assignedUserId || null
+                assignedUserId: assignedUserId || null,
+                assignedUserName: assignedUserName || null
             };
         }
 
@@ -3045,13 +3047,16 @@
                                 const row = payload.new || payload.old || {};
                                 const pid = row.id;
                                 const userId = row.user_id ?? row.userId;
+                                const normalizedRow = normalizePendencyRow(row);
+                                const destination = getEffectivePendencyArea(normalizedRow);
 
                                 // Nova pendência criada (para DEV/C-Level conforme escopo)
                                 if (evt === 'INSERT') {
                                     const createdByMe = isCurrentUserId(userId);
                                     if (!createdByMe) {
-                                        const scope = getPendencyScope(row.type);
-                                        const canSee = isCLevelRole(currentUser?.role) || (scope === 'dev' ? isDevRole(currentUser?.role) : true);
+                                        const canSee = destination === 'dev'
+                                            ? isDevRole(currentUser?.role)
+                                            : (destination === 'clevel' ? isCLevelRole(currentUser?.role) : true);
                                         if (canSee) {
                                             showToast({
                                                 title: '📋 Nova pendência criada',
@@ -3110,10 +3115,18 @@
                             const pendency = state.pendencies.byId.get(String(pendencyId));
                             if (!pendency) return;
 
-                            const isMine = isCurrentUserId(pendency.userId ?? pendency.user_id);
-                            const isAssigned = isCurrentUserId(pendency.assignedUserId ?? pendency.assigned_user_id);
-                            const canSee = isMine || isAssigned || isCLevelRole(currentUser?.role) || (getEffectivePendencyArea(pendency) === 'dev' && isDevRole(currentUser?.role));
-                            if (!canSee) return;
+                            const requesterId = pendency.userId ?? pendency.user_id ?? null;
+                            const handlerId = pendency?.assignedUserId ?? pendency?.assigned_user_id ?? null;
+                            if (!handlerId) return; // sem responsável definido, não notificar
+
+                            const amRequester = isCurrentUserId(requesterId);
+                            const amHandler = isCurrentUserId(handlerId);
+                            if (!amRequester && !amHandler) return;
+
+                            // Notifica apenas quando a outra pessoa do "par" enviou a mensagem
+                            const senderStr = (senderId === undefined || senderId === null) ? '' : String(senderId).trim();
+                            if (amRequester && !isSameUserId(senderStr, handlerId)) return;
+                            if (amHandler && !isSameUserId(senderStr, requesterId)) return;
 
                             // Se o modal dessa pendência estiver aberto, não precisa toast
                             const modalOpen = document.getElementById('pendencyDetailsModal')?.classList?.contains('active');
@@ -10567,8 +10580,12 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             return pendencias.filter(p => {
                 const status = (p?.status || '').toLowerCase();
                 const concluida = ['completed', 'concluida', 'concluída'].includes(status);
-                const responsavel = String(p?.approvedBy || p?.approved_by || p?.userName || p?.user_name || '');
-                return concluida && responsavel === staff.name;
+                const meta = (p?.attachments && typeof p.attachments === 'object') ? (p.attachments._meta || p.attachments.meta || null) : null;
+                const responsavel = String(
+                    p?.assignedUserName || p?.assigned_user_name || meta?.assignedUserName || meta?.assigned_user_name ||
+                    p?.approvedBy || p?.approved_by || ''
+                );
+                return concluida && normalizePersonLabel(responsavel) === normalizePersonLabel(staff.displayName || staff.name || '');
             }).length;
         }
 
@@ -13268,7 +13285,8 @@ processDiscordCommand() diretamente.
                                 actorUserId: getCurrentUserIdString(),
                                 actorName: String(currentUser?.displayName || currentUser?.name || ''),
                                 pendencyUserId: String(payloadBase.user_id || ''),
-                                destination
+                                destination,
+                                suppressSelf: true
                             }
                         }).catch(() => {});
                     }
@@ -13643,6 +13661,15 @@ processDiscordCommand() diretamente.
                 alert('Pendência não encontrada.');
                 return;
             }
+            const meta = (pendency.attachments && typeof pendency.attachments === 'object')
+                ? (pendency.attachments._meta || pendency.attachments.meta || null)
+                : null;
+            const assignedUserId = meta?.assignedUserId ?? meta?.assigned_user_id ?? pendency.assignedUserId ?? pendency.assigned_user_id ?? null;
+            const assignedUserName = meta?.assignedUserName ?? meta?.assigned_user_name ?? meta?.assignedByName ?? pendency.assignedUserName ?? pendency.assigned_user_name ?? null;
+            const canManage = hasPermission('pendency.approve') || hasPermission('dashboard') || isCLevelRole(currentUser?.role) || isDevRole(currentUser?.role);
+            const isRequester = isCurrentUserId(pendency.userId ?? pendency.user_id);
+            const isAssignedToMe = assignedUserId ? isCurrentUserId(assignedUserId) : false;
+            const canAssume = canManage && !isRequester && (!assignedUserId || !isAssignedToMe);
             const priorityColors = {
                 urgent: { bg: 'var(--danger)', label: 'Urgente' },
                 high: { bg: 'var(--danger)', label: 'Alta' },
@@ -13732,6 +13759,20 @@ processDiscordCommand() diretamente.
                     </div>
                     ` : ''}
 
+                    <div style="margin-top: 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 12px; padding: 14px;">
+                        <div>
+                            <div style="font-size: 12px; color: var(--gray-text); margin-bottom: 6px;">Responsável</div>
+                            <div id="pendencyAssignedLabel" style="color: var(--white-soft); font-weight: 700;">
+                                ${assignedUserName ? escapeHtml(String(assignedUserName)) : (assignedUserId ? `ID ${escapeHtml(String(assignedUserId))}` : '<span style="color: var(--gray-light); font-weight: 600;">Não atribuído</span>')}
+                            </div>
+                        </div>
+                        ${canAssume ? `
+                            <button id="pendencyAssumeBtn" type="button" class="btn btn-primary" onclick="assignPendencyToMe(${pendency.id})" style="width: auto; padding: 10px 14px; border-radius: 12px;">
+                                <i class="fas fa-hand-pointer"></i> Assumir
+                            </button>
+                        ` : ''}
+                    </div>
+
                     <div style="margin-top: 24px;">
                         <h4 style="color: var(--white-soft); font-size: 16px; margin-bottom: 12px;">
                             <i class="fas fa-comments" style="color: var(--gray-very-light); margin-right: 8px;"></i>
@@ -13762,6 +13803,105 @@ processDiscordCommand() diretamente.
 
             // Inicializar mini-chat da pendência
             setupPendencyChat(pendency.id);
+        }
+
+        function mergePendencyAttachmentsMeta(existingAttachments, metaPatch) {
+            const base = (existingAttachments && typeof existingAttachments === 'object' && !Array.isArray(existingAttachments))
+                ? { ...existingAttachments }
+                : {};
+            const currentMetaRaw = base._meta ?? base.meta ?? null;
+            const currentMeta = (currentMetaRaw && typeof currentMetaRaw === 'object' && !Array.isArray(currentMetaRaw))
+                ? currentMetaRaw
+                : {};
+            base._meta = { ...currentMeta, ...(metaPatch && typeof metaPatch === 'object' ? metaPatch : {}) };
+            return base;
+        }
+
+        async function assignPendencyToMe(pendencyId) {
+            const pid = Number(pendencyId);
+            if (!pid) return;
+
+            if (!supabaseClient) {
+                alert('Supabase indisponível. Não foi possível assumir a pendência.');
+                return;
+            }
+
+            const myId = getCurrentUserIdString();
+            if (!myId) {
+                alert('Você precisa estar logado para assumir a pendência.');
+                return;
+            }
+
+            const canManage = hasPermission('pendency.approve') || hasPermission('dashboard') || isCLevelRole(currentUser?.role) || isDevRole(currentUser?.role);
+            if (!canManage) {
+                alert('Você não tem permissão para assumir esta pendência.');
+                return;
+            }
+
+            await ensurePendenciesLoaded(false);
+            const pendency = state.pendencies.byId.get(String(pid));
+            if (!pendency) {
+                alert('Pendência não encontrada.');
+                return;
+            }
+
+            const requesterId = pendency?.userId ?? pendency?.user_id ?? null;
+            if (isSameUserId(requesterId, myId)) {
+                alert('Você não pode assumir a própria pendência.');
+                return;
+            }
+
+            const existingAssignedId = String(pendency?.assignedUserId ?? pendency?.assigned_user_id ?? '').trim();
+            const existingAssignedName = (pendency?.assignedUserName ?? pendency?.assigned_user_name ?? '').toString().trim();
+            if (existingAssignedId && isSameUserId(existingAssignedId, myId)) {
+                try { showToast({ title: '✅ Já está com você', message: `Pendência #${pid} já está atribuída para você.`, variant: 'success' }); } catch (e) {}
+                return;
+            }
+
+            if (existingAssignedId && !isSameUserId(existingAssignedId, myId)) {
+                const ok = confirm(`Esta pendência já está atribuída para ${existingAssignedName || ('ID ' + existingAssignedId)}. Deseja assumir mesmo assim?`);
+                if (!ok) return;
+            }
+
+            return withIdempotency(`pendency:assign:${pid}`, async () => {
+                try {
+                    const patch = {
+                        assignedUserId: myId,
+                        assignedUserName: String(currentUser?.displayName || currentUser?.name || '').trim() || `ID ${myId}`,
+                        assignedAt: new Date().toISOString()
+                    };
+
+                    const mergedAttachments = mergePendencyAttachmentsMeta(pendency.attachments, patch);
+
+                    const { data: saved, error } = await supabaseClient
+                        .from('pendencies')
+                        .update({ attachments: mergedAttachments })
+                        .eq('id', pid)
+                        .select('*')
+                        .single();
+
+                    if (error) throw error;
+
+                    const normalized = normalizePendencyRow(saved);
+                    upsertItem(state.pendencies.byId, normalized);
+                    refreshGlobalsForKey('txd_pendencies').catch(() => {});
+                    renderPendencias();
+
+                    const labelEl = document.getElementById('pendencyAssignedLabel');
+                    if (labelEl) {
+                        labelEl.innerHTML = escapeHtml(String(patch.assignedUserName));
+                    }
+                    const btnEl = document.getElementById('pendencyAssumeBtn');
+                    if (btnEl) {
+                        btnEl.classList.add('hidden');
+                    }
+
+                    try { showToast({ title: '✅ Pendência assumida', message: `Você assumiu a pendência #${pid}.`, variant: 'success' }); } catch (e) {}
+                } catch (err) {
+                    console.error('Erro ao assumir pendência:', err);
+                    alert('Erro ao assumir pendência. Tente novamente.');
+                }
+            });
         }
 
         // ========== MINI-CHAT POR PENDÊNCIA ==========
@@ -13974,12 +14114,14 @@ processDiscordCommand() diretamente.
                         await ensurePendenciesLoaded(false);
                         const pendency = state.pendencies.byId.get(String(pid));
                         const pendencyUserId = pendency?.userId ?? pendency?.user_id ?? null;
-                        const assignedUserId = pendency?.assignedUserId ?? pendency?.assigned_user_id ?? null;
-                        const isOwner = isSameUserId(pendencyUserId, getCurrentUserIdString());
+                        const handlerUserId = (pendency?.assignedUserId ?? pendency?.assigned_user_id ?? null);
+                        const meId = getCurrentUserIdString();
+                        const isOwner = isSameUserId(pendencyUserId, meId);
+                        const isHandler = handlerUserId ? isSameUserId(handlerUserId, meId) : false;
                         const msgPreview = text.length > 140 ? (text.slice(0, 140) + '…') : text;
 
-                        if (!isOwner && pendencyUserId) {
-                            // Staff -> avisar solicitante
+                        if (isHandler && pendencyUserId && !isSameUserId(pendencyUserId, meId)) {
+                            // Responsável -> avisar solicitante
                             createNotification({
                                 type: 'pendency_message',
                                 title: '💬 Nova mensagem na sua pendência',
@@ -13991,44 +14133,27 @@ processDiscordCommand() diretamente.
                                 metadata: {
                                     actorUserId: getCurrentUserIdString(),
                                     actorName: String(currentUser?.displayName || currentUser?.name || ''),
-                                    sender: getPendencyChatSenderLabel()
+                                    sender: getPendencyChatSenderLabel(),
+                                    suppressSelf: true
                                 }
                             }).catch(() => {});
-                        } else {
-                            // Solicitante -> avisar time responsável (ou usuário atribuído)
-                            if (assignedUserId && !isSameUserId(assignedUserId, getCurrentUserIdString())) {
-                                createNotification({
-                                    type: 'pendency_message',
-                                    title: '💬 Nova mensagem em pendência atribuída',
-                                    body: `#${pid} • ${(pendency?.title || 'Sem título')}\n${msgPreview}`,
-                                    audience: 'user',
-                                    audienceUserId: assignedUserId,
-                                    entityType: 'pendency',
-                                    entityId: pid,
-                                    metadata: {
-                                        actorUserId: getCurrentUserIdString(),
-                                        actorName: String(currentUser?.displayName || currentUser?.name || ''),
-                                        sender: getPendencyChatSenderLabel()
-                                    }
-                                }).catch(() => {});
-                            } else {
-                                const dest = getEffectivePendencyArea(pendency);
-                                const audience = dest === 'dev' ? 'dev' : (dest === 'clevel' ? 'clevel' : 'all');
-                                createNotification({
-                                    type: 'pendency_message',
-                                    title: '💬 Nova mensagem em pendência',
-                                    body: `#${pid} • ${(pendency?.title || 'Sem título')}\n${msgPreview}`,
-                                    audience,
-                                    entityType: 'pendency',
-                                    entityId: pid,
-                                    metadata: {
-                                        actorUserId: getCurrentUserIdString(),
-                                        actorName: String(currentUser?.displayName || currentUser?.name || ''),
-                                        sender: getPendencyChatSenderLabel(),
-                                        destination: dest
-                                    }
-                                }).catch(() => {});
-                            }
+                        } else if (isOwner && handlerUserId && !isSameUserId(handlerUserId, meId)) {
+                            // Solicitante -> avisar responsável (quem assumiu)
+                            createNotification({
+                                type: 'pendency_message',
+                                title: '💬 Nova mensagem na pendência',
+                                body: `#${pid} • ${(pendency?.title || 'Sem título')}\n${msgPreview}`,
+                                audience: 'user',
+                                audienceUserId: String(handlerUserId),
+                                entityType: 'pendency',
+                                entityId: pid,
+                                metadata: {
+                                    actorUserId: getCurrentUserIdString(),
+                                    actorName: String(currentUser?.displayName || currentUser?.name || ''),
+                                    sender: getPendencyChatSenderLabel(),
+                                    suppressSelf: true
+                                }
+                            }).catch(() => {});
                         }
                     }
                 } catch (e) {}
@@ -15093,11 +15218,36 @@ processDiscordCommand() diretamente.
             const audience = normalizeText(notification.audience || 'all');
             const userId = getCurrentUserIdString();
 
+            // Não notificar o próprio autor (quando marcado explicitamente)
+            try {
+                const suppressSelf = !!(notification?.metadata?.suppressSelf ?? notification?.metadata?.suppress_self);
+                const actorId = notification?.metadata?.actorUserId ?? notification?.metadata?.actor_user_id ?? null;
+                if (suppressSelf && isSameUserId(actorId, userId)) return false;
+            } catch (e) {}
+
             if (audience === 'all' || audience === '*' || audience === 'staff') return true;
-            if (audience === 'dev') return isDevRole(currentUser?.role) || isCLevelRole(currentUser?.role);
+            // "dev" deve ser somente DEV (não inclui C-Level)
+            if (audience === 'dev') return isDevRole(currentUser?.role);
             if (audience === 'clevel' || audience === 'c_level') return isCLevelRole(currentUser?.role);
             if (audience === 'user') return userId && isSameUserId(notification.audienceUserId ?? notification.audience_user_id, userId);
             return false;
+        }
+
+        function normalizePersonLabel(value) {
+            const raw = (value ?? '').toString().trim();
+            if (!raw) return '';
+            // Remove sufixos tipo "Nome (Cargo)"
+            return raw.replace(/\s*\([^)]*\)\s*$/g, '').trim().toLowerCase();
+        }
+
+        function findStaffByAnyName(label) {
+            const target = normalizePersonLabel(label);
+            if (!target) return null;
+            const staffArray = Array.isArray(staffData) ? staffData : [];
+            return staffArray.find(s => {
+                const candidates = [s?.displayName, s?.name, s?.login].map(normalizePersonLabel).filter(Boolean);
+                return candidates.includes(target);
+            }) || null;
         }
 
         async function detectNotificationsSupport() {
