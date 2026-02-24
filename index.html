@@ -1967,6 +1967,7 @@
                 <li><a href="#" onclick="showSection('ranking'); return false;">📊 Ranking</a></li>
                 <li><a href="#" onclick="showSection('conquistas'); return false;">🏆 Conquistas</a></li>
                 <li><a href="#" onclick="showSection('comandos'); return false;">Comandos</a></li>
+                <li><a href="#" onclick="showSection('votacoes'); return false;">🗳️ Votações</a></li>
                 <li><a href="#" onclick="showSection('controle'); return false;">Controle</a></li>
                 <li><a href="#" onclick="showSection('areas'); return false;">Áreas</a></li>
                 <li><a href="#" onclick="showSection('advertencias'); return false;">Advertências</a></li>
@@ -2586,6 +2587,65 @@
                 <div style="display: flex; gap: 10px; margin-top: 20px;">
                     <button type="button" class="btn btn-secondary" onclick="closeModal('cardModal')" style="flex: 1;">Cancelar</button>
                     <button type="submit" class="btn btn-primary" style="flex: 1;">Salvar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal: Criar/Editar Votação -->
+    <div id="pollModal" class="modal">
+        <div class="modal-content modal-lg">
+            <span class="close" onclick="closeModal('pollModal')">&times;</span>
+            <div class="modal-header">
+                <h2><i class="fas fa-chart-bar"></i> <span id="pollModalTitle">Nova Votação</span></h2>
+            </div>
+            <form id="pollForm" onsubmit="savePoll(event)">
+                <input type="hidden" id="pollId">
+
+                <div class="input-group">
+                    <label>Título *</label>
+                    <input type="text" id="pollTitle" placeholder="Ex: Alterar horário da reunião semanal?" required>
+                </div>
+
+                <div class="input-group">
+                    <label>Descrição</label>
+                    <textarea id="pollDescription" rows="3" placeholder="Detalhes (opcional)..."></textarea>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                    <div class="input-group">
+                        <label>Encerrar em (opcional)</label>
+                        <input type="datetime-local" id="pollEndsAt">
+                        <small style="color: var(--gray-text); font-size: 12px; margin-top: 6px; display: block;">Se vazio, a votação fica aberta até ser encerrada manualmente.</small>
+                    </div>
+                    <div class="input-group">
+                        <label>Status</label>
+                        <select id="pollStatus">
+                            <option value="open">Aberta</option>
+                            <option value="closed">Encerrada</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="input-group">
+                    <label>Quem pode votar? *</label>
+                    <div id="pollAllowedRoles" style="padding: 12px; background: var(--gray-medium); border: 1px solid var(--gray-border); border-radius: 12px; max-height: 220px; overflow: auto;"></div>
+                    <small style="color: var(--gray-text); font-size: 12px; margin-top: 6px; display: block;">Se não marcar nenhum cargo, todos os cargos poderão votar.</small>
+                </div>
+
+                <div class="input-group">
+                    <label>Opções *</label>
+                    <div id="pollOptionsList" style="display: flex; flex-direction: column; gap: 10px;"></div>
+                    <button type="button" class="btn btn-secondary" onclick="addPollOptionRow()" style="width: auto; padding: 10px 14px; margin-top: 10px;">
+                        <i class="fas fa-plus"></i> Adicionar opção
+                    </button>
+                </div>
+
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('pollModal')" style="flex: 1;">Cancelar</button>
+                    <button type="submit" class="btn btn-primary" style="flex: 1;">
+                        <i class="fas fa-save"></i> Salvar Votação
+                    </button>
                 </div>
             </form>
         </div>
@@ -3327,6 +3387,9 @@
             subscribeKeyInvalidation('system_logs_changes', 'system_logs', 'txd_system_logs', 900);
             subscribeKeyInvalidation('system_settings_changes', 'system_settings', 'txd_system_settings', 900);
             subscribeKeyInvalidation('security_settings_changes', 'security_settings', 'txd_security_settings', 900);
+            subscribeKeyInvalidation('polls_changes', 'polls', 'txd_polls', 900);
+            subscribeKeyInvalidation('poll_options_changes', 'poll_options', 'txd_poll_options', 900);
+            subscribeKeyInvalidation('poll_votes_changes', 'poll_votes', 'txd_poll_votes', 650);
 
             const issuesChannel = supabaseClient
                 .channel('issues_changes')
@@ -3388,7 +3451,10 @@
             'txd_registration_requests': 'registration_requests',
             'txd_license_requests': 'license_requests',
             'txd_warnings': 'warnings',
-            'txd_pendencies': 'pendencies'
+            'txd_pendencies': 'pendencies',
+            'txd_polls': 'polls',
+            'txd_poll_options': 'poll_options',
+            'txd_poll_votes': 'poll_votes'
         };
         
         // ========== FUNÇÕES SUPABASE ==========
@@ -3798,6 +3864,30 @@
                             .select('*')
                             .order('created_at', { ascending: false });
                         if (!pendenciesError) data = toCamelCase(pendenciesData || []);
+                        break;
+
+                    case 'txd_polls':
+                        const { data: pollsData, error: pollsError } = await supabaseClient
+                            .from('polls')
+                            .select('*')
+                            .order('created_at', { ascending: false });
+                        if (!pollsError) data = toCamelCase(pollsData || []);
+                        break;
+
+                    case 'txd_poll_options':
+                        const { data: pollOptionsData, error: pollOptionsError } = await supabaseClient
+                            .from('poll_options')
+                            .select('*')
+                            .order('created_at', { ascending: true });
+                        if (!pollOptionsError) data = toCamelCase(pollOptionsData || []);
+                        break;
+
+                    case 'txd_poll_votes':
+                        const { data: pollVotesData, error: pollVotesError } = await supabaseClient
+                            .from('poll_votes')
+                            .select('*')
+                            .order('created_at', { ascending: false });
+                        if (!pollVotesError) data = toCamelCase(pollVotesData || []);
                         break;
                 }
                 
@@ -5018,6 +5108,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 'dev_create': 'DEV - Criar Tarefa',
                 'dev_detail': 'DEV - Detalhe da Tarefa',
                 'relatorios': 'Relatórios de Reunião',
+                'votacoes': '🗳️ Votações',
                 'config': 'Configurações do Sistema'
             };
             document.getElementById('sectionTitle').textContent = titles[section] || 'Painel TXD Staff';
@@ -5052,6 +5143,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             'dev_create': 'dev_area',
             'dev_detail': 'dev_area',
             'pendencias': '*', // Todos podem solicitar pendências
+            'votacoes': '*', // Acesso geral; quem vota é definido na votação
             'relatorios': 'relatorios',
             'perfil': '*', // Todos podem acessar seu próprio perfil
             'config': 'sistema' // Sistema, config ou logs
@@ -5453,6 +5545,9 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                     break;
                 case 'config':
                     loadSettings();
+                    break;
+                case 'votacoes':
+                    loadVotacoes();
                     break;
             }
         }
@@ -17312,6 +17407,601 @@ processDiscordCommand() diretamente.
             }
         }
 
+        // ========== VOTAÇÕES ==========
+
+        const STAFF_ROLES_LIST = [
+            'Owner', 'CEO', 'COO', 'CMO', 'CCO', 'CIO',
+            'Diretor', 'Head Staff', 'Coordenador', 'Admin', 'Moderador', 'Suporte', 'Helper', 'Dev'
+        ];
+
+        let pollsUiFilterMode = 'open'; // open | closed | all
+
+        function normalizeRoleKey(role) {
+            return (role || '').toString().toLowerCase().replace(/\s+/g, '').trim();
+        }
+
+        function pollRoleIsAllowed(poll, role) {
+            const allowed = poll?.allowedRoles ?? poll?.allowed_roles;
+            if (!Array.isArray(allowed) || allowed.length === 0) return true;
+            const normalizedAllowed = new Set(allowed.map(normalizeRoleKey));
+            return normalizedAllowed.has(normalizeRoleKey(role));
+        }
+
+        function pollIsOpenNow(poll) {
+            const status = (poll?.status || 'open').toString().toLowerCase().trim();
+            if (status !== 'open') return false;
+            const endsAt = poll?.endsAt ?? poll?.ends_at ?? null;
+            if (!endsAt) return true;
+            const t = new Date(endsAt).getTime();
+            if (!Number.isFinite(t)) return true;
+            return Date.now() < t;
+        }
+
+        function canManagePolls() {
+            return isCLevelRole(currentUser?.role) || isDevRole(currentUser?.role);
+        }
+
+        function formatDateTimeBR(value) {
+            if (!value) return '';
+            const d = new Date(value);
+            if (!Number.isFinite(d.getTime())) return '';
+            return d.toLocaleString('pt-BR');
+        }
+
+        function getCurrentVoterId() {
+            const id = currentUser?.id;
+            if (id === undefined || id === null) return '';
+            return String(id).trim();
+        }
+
+        function computePollResults(pollId, options, votes) {
+            const optionCounts = new Map();
+            let total = 0;
+            (options || []).forEach(o => optionCounts.set(String(o.id), 0));
+            (votes || []).forEach(v => {
+                if (String(v.pollId ?? v.poll_id) !== String(pollId)) return;
+                const opt = String(v.optionId ?? v.option_id ?? '');
+                if (!opt) return;
+                optionCounts.set(opt, (optionCounts.get(opt) || 0) + 1);
+                total += 1;
+            });
+            return { optionCounts, total };
+        }
+
+        function setPollsFilter(mode) {
+            pollsUiFilterMode = String(mode || 'open');
+            loadVotacoes();
+        }
+
+        async function loadVotacoes() {
+            const contentCard = document.querySelector('.content-card');
+            if (!contentCard) return;
+
+            const [pollsRaw, optionsRaw, votesRaw] = await Promise.all([
+                getData('txd_polls', false),
+                getData('txd_poll_options', false),
+                getData('txd_poll_votes', false)
+            ]);
+
+            const polls = Array.isArray(pollsRaw) ? pollsRaw : [];
+            const pollOptions = Array.isArray(optionsRaw) ? optionsRaw : [];
+            const pollVotes = Array.isArray(votesRaw) ? votesRaw : [];
+
+            const openPolls = polls.filter(p => pollIsOpenNow(p));
+            const closedPolls = polls.filter(p => !pollIsOpenNow(p));
+
+            const visiblePolls = pollsUiFilterMode === 'all'
+                ? polls
+                : (pollsUiFilterMode === 'closed' ? closedPolls : openPolls);
+
+            const canCreate = canManagePolls();
+
+            contentCard.innerHTML = `
+                <div class=\"commands-header\">
+                    <div>
+                        <h1 style=\"margin-bottom: 6px;\">🗳️ Votações</h1>
+                        <p style=\"color: var(--gray-light); margin: 0;\">Crie votações internas e registre os votos por cargo.</p>
+                    </div>
+                    <div style=\"display: flex; gap: 10px; align-items: center; flex-wrap: wrap;\">
+                        <div class=\"commands-filters\" style=\"margin: 0;\">
+                            <div class=\"filter-chip ${pollsUiFilterMode === 'open' ? 'active' : ''}\" onclick=\"setPollsFilter('open')\"><i class=\"fas fa-unlock\"></i> Abertas (${openPolls.length})</div>
+                            <div class=\"filter-chip ${pollsUiFilterMode === 'closed' ? 'active' : ''}\" onclick=\"setPollsFilter('closed')\"><i class=\"fas fa-lock\"></i> Encerradas (${closedPolls.length})</div>
+                            <div class=\"filter-chip ${pollsUiFilterMode === 'all' ? 'active' : ''}\" onclick=\"setPollsFilter('all')\"><i class=\"fas fa-layer-group\"></i> Todas (${polls.length})</div>
+                        </div>
+                        ${canCreate ? `
+                        <button class=\"btn btn-primary\" style=\"width:auto; padding: 12px 14px;\" onclick=\"openPollModal()\">
+                            <i class=\"fas fa-plus\"></i> Nova votação
+                        </button>` : ``}
+                    </div>
+                </div>
+
+                <div id=\"pollsList\" style=\"display: flex; flex-direction: column; gap: 14px; margin-top: 16px;\">
+                    ${visiblePolls.length === 0 ? `
+                        <div class=\"commands-empty\" style=\"padding: 40px 20px;\">
+                            <i class=\"fas fa-chart-bar\" style=\"font-size: 54px;\"></i>
+                            <div style=\"margin-top: 10px;\">Nenhuma votação para exibir.</div>
+                        </div>
+                    ` : visiblePolls.map(poll => renderPollCard(poll, pollOptions, pollVotes)).join('')}
+                </div>
+            `;
+        }
+
+        function renderPollCard(poll, pollOptions, pollVotes) {
+            const pollId = poll?.id;
+            const isOpen = pollIsOpenNow(poll);
+            const endsAt = poll?.endsAt ?? poll?.ends_at ?? null;
+            const createdAt = poll?.createdAt ?? poll?.created_at ?? null;
+            const allowed = Array.isArray(poll?.allowedRoles) ? poll.allowedRoles : (Array.isArray(poll?.allowed_roles) ? poll.allowed_roles : []);
+
+            const options = (pollOptions || [])
+                .filter(o => String(o.pollId ?? o.poll_id) === String(pollId))
+                .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+
+            const votes = (pollVotes || []).filter(v => String(v.pollId ?? v.poll_id) === String(pollId));
+            const voterId = getCurrentVoterId();
+            const myVote = votes.find(v => String(v.voterId ?? v.voter_id) === voterId);
+            const hasVoted = !!myVote;
+
+            const canVote = isOpen && pollRoleIsAllowed(poll, currentUser?.role);
+            const showResults = !isOpen || hasVoted;
+            const { optionCounts, total } = computePollResults(pollId, options, votes);
+
+            return `
+                <div style=\"background: var(--gray-dark); border: 1px solid var(--gray-border); border-radius: 16px; padding: 20px;\">
+                    <div style=\"display:flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: flex-start;\">
+                        <div style=\"min-width: 260px; flex: 1;\">
+                            <div style=\"display:flex; align-items:center; gap:10px; flex-wrap: wrap;\">
+                                <div style=\"font-size: 16px; font-weight: 800; color: var(--white-soft);\">${escapeHtml(poll?.title || 'Sem título')}</div>
+                                <span style=\"font-size: 11px; font-weight: 800; letter-spacing: .6px; text-transform: uppercase; padding: 4px 10px; border-radius: 999px; border: 1px solid ${isOpen ? 'rgba(0,255,136,.35)' : 'rgba(255,51,102,.35)'}; color: ${isOpen ? 'var(--success)' : 'var(--danger)'}; background: ${isOpen ? 'rgba(0,255,136,.08)' : 'rgba(255,51,102,.08)'};\">
+                                    ${isOpen ? 'ABERTA' : 'ENCERRADA'}
+                                </span>
+                            </div>
+                            ${poll?.description ? `<div style=\"color: var(--gray-light); margin-top: 8px; line-height: 1.6;\">${escapeHtml(poll.description)}</div>` : ``}
+                            <div style=\"display:flex; gap: 14px; flex-wrap: wrap; margin-top: 12px; color: var(--gray-text); font-size: 12px;\">
+                                <div><i class=\"fas fa-user\"></i> ${escapeHtml(poll?.createdBy || poll?.created_by || 'Sistema')}</div>
+                                ${createdAt ? `<div><i class=\"fas fa-clock\"></i> ${formatDateTimeBR(createdAt)}</div>` : ``}
+                                ${endsAt ? `<div><i class=\"fas fa-hourglass-end\"></i> Encerra: ${formatDateTimeBR(endsAt)}</div>` : ``}
+                            </div>
+                            <div style=\"margin-top: 10px; display:flex; flex-wrap: wrap; gap: 8px; align-items: center;\">
+                                <span style=\"color: var(--gray-text); font-size: 12px; font-weight: 700;\">Pode votar:</span>
+                                ${(allowed && allowed.length > 0) ? allowed.map(r => `<span style=\"padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(207,207,207,.25); background: rgba(207,207,207,.08); color: var(--gray-very-light); font-size: 12px;\">${escapeHtml(r)}</span>`).join('') : `<span style=\"padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(0,255,136,.25); background: rgba(0,255,136,.08); color: var(--success); font-size: 12px;\">Todos</span>`}
+                            </div>
+                        </div>
+
+                        ${canManagePolls() ? `
+                        <div style=\"display:flex; gap: 8px; align-items:center; flex-wrap: wrap;\">
+                            <button class=\"btn btn-secondary\" style=\"width:auto; padding: 10px 12px;\" onclick=\"openPollModal(${pollId})\"><i class=\"fas fa-pen\"></i> Editar</button>
+                            ${isOpen ? `<button class=\"btn btn-danger\" style=\"width:auto; padding: 10px 12px;\" onclick=\"closePoll(${pollId})\"><i class=\"fas fa-lock\"></i> Encerrar</button>` : ``}
+                            <button class=\"btn btn-secondary\" style=\"width:auto; padding: 10px 12px; border-color: rgba(255,51,102,.35); color: var(--danger);\" onclick=\"deletePoll(${pollId})\"><i class=\"fas fa-trash\"></i></button>
+                        </div>` : ``}
+                    </div>
+
+                    <div style=\"margin-top: 16px; display: grid; grid-template-columns: 1fr; gap: 12px;\">
+                        ${options.length === 0 ? `
+                            <div style=\"color: var(--gray-text); font-size: 13px;\">Sem opções cadastradas.</div>
+                        ` : options.map(opt => renderPollOption(pollId, opt, { isOpen, canVote, hasVoted, showResults, myVote, optionCounts, total })).join('')}
+                    </div>
+
+                    ${(!canVote && isOpen && !hasVoted) ? `
+                        <div style=\"margin-top: 14px; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,170,0,.35); background: rgba(255,170,0,.08); color: var(--warning); font-weight: 600;\">
+                            <i class=\"fas fa-ban\"></i> Seu cargo (${escapeHtml(currentUser?.role || 'N/A')}) não está autorizado a votar nesta votação.
+                        </div>
+                    ` : ``}
+
+                    ${(!showResults && isOpen && canVote && !hasVoted) ? `
+                        <div style=\"margin-top: 14px; color: var(--gray-text); font-size: 12px;\">
+                            Os resultados serão exibidos após você votar ou quando a votação for encerrada.
+                        </div>
+                    ` : ``}
+
+                    <div style=\"margin-top: 12px; color: var(--gray-text); font-size: 12px;\">
+                        Total de votos: <strong style=\"color: var(--white-soft);\">${total}</strong>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderPollOption(pollId, opt, ctx) {
+            const optId = opt?.id;
+            const optText = opt?.optionText ?? opt?.option_text ?? '';
+            const count = ctx.optionCounts.get(String(optId)) || 0;
+            const percent = ctx.total > 0 ? Math.round((count / ctx.total) * 100) : 0;
+            const selected = ctx.hasVoted && String(ctx.myVote?.optionId ?? ctx.myVote?.option_id) === String(optId);
+
+            if (!ctx.showResults && ctx.isOpen && ctx.canVote && !ctx.hasVoted) {
+                return `
+                    <div style=\"display:flex; gap: 10px; align-items:center; padding: 12px; border-radius: 12px; background: var(--gray-medium); border: 1px solid var(--gray-border);\">
+                        <div style=\"flex: 1; color: var(--white-soft);\">${escapeHtml(optText || 'Opção')}</div>
+                        <button class=\"btn btn-primary\" style=\"width:auto; padding: 10px 12px;\" onclick=\"voteOnPoll(${pollId}, ${optId})\">
+                            <i class=\"fas fa-check\"></i> Votar
+                        </button>
+                    </div>
+                `;
+            }
+
+            return `
+                <div style=\"padding: 12px; border-radius: 12px; background: ${selected ? 'rgba(0,255,136,.08)' : 'var(--gray-medium)'}; border: 1px solid ${selected ? 'rgba(0,255,136,.35)' : 'var(--gray-border)'};\">
+                    <div style=\"display:flex; align-items:center; justify-content: space-between; gap: 12px;\">
+                        <div style=\"flex:1; color: var(--white-soft); font-weight: ${selected ? '800' : '600'};\">
+                            ${selected ? '✅ ' : ''}${escapeHtml(optText || 'Opção')}
+                        </div>
+                        <div style=\"color: var(--gray-very-light); font-weight: 700;\">${count} (${percent}%)</div>
+                    </div>
+                    <div style=\"margin-top: 10px; height: 10px; border-radius: 999px; overflow: hidden; border: 1px solid rgba(255,255,255,.08); background: rgba(0,0,0,.25);\">
+                        <div style=\"height: 100%; width: ${percent}%; background: linear-gradient(90deg, var(--success), var(--gray-very-light));\"></div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderAllowedRolesChecklist(selectedRoles = []) {
+            const container = document.getElementById('pollAllowedRoles');
+            if (!container) return;
+            const selected = new Set((selectedRoles || []).map(normalizeRoleKey));
+            container.innerHTML = `
+                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px;">
+                    ${STAFF_ROLES_LIST.map(role => {
+                        const checked = selected.has(normalizeRoleKey(role));
+                        return `
+                            <label style="display:flex; gap: 10px; align-items:center; padding: 10px; border-radius: 10px; background: rgba(0,0,0,.15); border: 1px solid rgba(255,255,255,.08); cursor: pointer;">
+                                <input type="checkbox" value="${escapeHtml(role)}" ${checked ? 'checked' : ''} style="width: 18px; height: 18px;">
+                                <span style="color: var(--white-soft); font-weight: 600; font-size: 13px;">${escapeHtml(role)}</span>
+                            </label>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+        }
+
+        function getSelectedAllowedRolesFromModal() {
+            const container = document.getElementById('pollAllowedRoles');
+            if (!container) return [];
+            const boxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+            return boxes.filter(b => b.checked).map(b => b.value);
+        }
+
+        function addPollOptionRow(value = '') {
+            const list = document.getElementById('pollOptionsList');
+            if (!list) return;
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.gap = '10px';
+            row.style.alignItems = 'center';
+            row.innerHTML = `
+                <input class="poll-option-input" type="text" value="${escapeHtml(value)}" placeholder="Ex: Sim" style="flex:1; padding: 12px 14px; background: var(--gray-dark); border: 1px solid var(--gray-border); border-radius: 12px; color: var(--white-soft); font-size: 14px;" required>
+                <button type="button" class="btn btn-secondary" style="width:auto; padding: 10px 12px;" title="Remover opção">
+                    <i class="fas fa-times"></i>
+                </button>
+            `;
+            row.querySelector('button')?.addEventListener('click', () => row.remove());
+            list.appendChild(row);
+        }
+
+        function getPollOptionsFromModal() {
+            const list = document.getElementById('pollOptionsList');
+            if (!list) return [];
+            const inputs = Array.from(list.querySelectorAll('.poll-option-input'));
+            return inputs.map(i => i.value.trim()).filter(v => v);
+        }
+
+        async function openPollModal(pollId = null) {
+            if (!canManagePolls()) {
+                alert('Você não tem permissão para criar/editar votações.');
+                return;
+            }
+            const modal = document.getElementById('pollModal');
+            if (!modal) return;
+
+            document.getElementById('pollForm')?.reset?.();
+            document.getElementById('pollId').value = pollId ? String(pollId) : '';
+            document.getElementById('pollModalTitle').textContent = pollId ? 'Editar Votação' : 'Nova Votação';
+
+            const list = document.getElementById('pollOptionsList');
+            if (list) list.innerHTML = '';
+
+            if (!pollId) {
+                renderAllowedRolesChecklist([]);
+                addPollOptionRow('');
+                addPollOptionRow('');
+                document.getElementById('pollStatus').value = 'open';
+                modal.classList.add('active');
+                return;
+            }
+
+            const [pollsRaw, optionsRaw, votesRaw] = await Promise.all([
+                getData('txd_polls', false),
+                getData('txd_poll_options', false),
+                getData('txd_poll_votes', false)
+            ]);
+            const polls = Array.isArray(pollsRaw) ? pollsRaw : [];
+            const pollOptions = Array.isArray(optionsRaw) ? optionsRaw : [];
+            const pollVotes = Array.isArray(votesRaw) ? votesRaw : [];
+
+            const poll = polls.find(p => String(p.id) === String(pollId));
+            if (!poll) {
+                alert('Votação não encontrada.');
+                return;
+            }
+
+            document.getElementById('pollTitle').value = poll.title || '';
+            document.getElementById('pollDescription').value = poll.description || '';
+            document.getElementById('pollStatus').value = (poll.status || 'open');
+
+            const endsAt = poll.endsAt ?? poll.ends_at ?? null;
+            if (endsAt) {
+                const d = new Date(endsAt);
+                if (Number.isFinite(d.getTime())) {
+                    const pad = (n) => String(n).padStart(2, '0');
+                    const local = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+                    document.getElementById('pollEndsAt').value = local;
+                }
+            }
+
+            const allowed = Array.isArray(poll.allowedRoles) ? poll.allowedRoles : (Array.isArray(poll.allowed_roles) ? poll.allowed_roles : []);
+            renderAllowedRolesChecklist(allowed);
+
+            const votes = pollVotes.filter(v => String(v.pollId ?? v.poll_id) === String(pollId));
+            const hasVotes = votes.length > 0;
+
+            const options = pollOptions
+                .filter(o => String(o.pollId ?? o.poll_id) === String(pollId))
+                .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+
+            if (!hasVotes) {
+                if (options.length > 0) {
+                    options.forEach(o => addPollOptionRow(o.optionText ?? o.option_text ?? ''));
+                } else {
+                    addPollOptionRow('');
+                    addPollOptionRow('');
+                }
+            } else {
+                const info = document.createElement('div');
+                info.style.color = 'var(--warning)';
+                info.style.fontWeight = '700';
+                info.style.fontSize = '13px';
+                info.style.marginBottom = '10px';
+                info.innerHTML = '<i class="fas fa-info-circle"></i> Esta votação já possui votos. As opções não podem ser alteradas.';
+                list?.appendChild(info);
+                options.forEach(o => {
+                    const optText = o.optionText ?? o.option_text ?? '';
+                    const row = document.createElement('div');
+                    row.style.padding = '12px 14px';
+                    row.style.borderRadius = '12px';
+                    row.style.background = 'rgba(0,0,0,.15)';
+                    row.style.border = '1px solid rgba(255,255,255,.08)';
+                    row.style.color = 'var(--white-soft)';
+                    row.textContent = optText || 'Opção';
+                    list?.appendChild(row);
+                });
+            }
+
+            modal.classList.add('active');
+        }
+
+        async function savePoll(event) {
+            event.preventDefault();
+            if (!supabaseClient) {
+                alert('Supabase não está disponível.');
+                return;
+            }
+            if (!canManagePolls()) {
+                alert('Você não tem permissão para criar/editar votações.');
+                return;
+            }
+
+            const pollIdValue = document.getElementById('pollId')?.value?.trim();
+            const title = document.getElementById('pollTitle')?.value?.trim();
+            const description = document.getElementById('pollDescription')?.value?.trim() || null;
+            const endsAtLocal = document.getElementById('pollEndsAt')?.value?.trim() || '';
+            const status = (document.getElementById('pollStatus')?.value || 'open').toString().trim();
+            const allowedRoles = getSelectedAllowedRolesFromModal();
+
+            if (!title) {
+                alert('Informe o título da votação.');
+                return;
+            }
+
+            const endsAtIso = endsAtLocal ? new Date(endsAtLocal).toISOString() : null;
+
+            const opKey = pollIdValue ? `poll:save:${pollIdValue}` : `poll:create:${title}`;
+            return withIdempotency(opKey, async () => {
+                try {
+                    if (!pollIdValue) {
+                        const { data: inserted, error: insertError } = await supabaseClient
+                            .from('polls')
+                            .insert([{
+                                title,
+                                description,
+                                status,
+                                ends_at: endsAtIso,
+                                allowed_roles: allowedRoles,
+                                created_by: currentUser?.name || currentUser?.displayName || 'Sistema',
+                                created_by_id: getCurrentVoterId() || null
+                            }])
+                            .select('*')
+                            .single();
+                        if (insertError) throw insertError;
+
+                        const options = getPollOptionsFromModal();
+                        if (options.length < 2) {
+                            alert('Adicione pelo menos 2 opções.');
+                            await supabaseClient.from('polls').delete().eq('id', inserted.id);
+                            return;
+                        }
+                        const rows = options.map((opt, idx) => ({
+                            poll_id: inserted.id,
+                            option_text: opt,
+                            position: idx
+                        }));
+                        const { error: optError } = await supabaseClient.from('poll_options').insert(rows);
+                        if (optError) throw optError;
+                    } else {
+                        const pollId = Number(pollIdValue);
+                        const { error: updateError } = await supabaseClient
+                            .from('polls')
+                            .update({
+                                title,
+                                description,
+                                status,
+                                ends_at: endsAtIso,
+                                allowed_roles: allowedRoles
+                            })
+                            .eq('id', pollId);
+                        if (updateError) throw updateError;
+
+                        const { data: votes, error: votesError } = await supabaseClient
+                            .from('poll_votes')
+                            .select('id')
+                            .eq('poll_id', pollId)
+                            .limit(1);
+                        if (votesError) throw votesError;
+                        const hasVotes = Array.isArray(votes) && votes.length > 0;
+
+                        if (!hasVotes) {
+                            const options = getPollOptionsFromModal();
+                            if (options.length < 2) {
+                                alert('Adicione pelo menos 2 opções.');
+                                return;
+                            }
+                            await supabaseClient.from('poll_options').delete().eq('poll_id', pollId);
+                            const rows = options.map((opt, idx) => ({
+                                poll_id: pollId,
+                                option_text: opt,
+                                position: idx
+                            }));
+                            const { error: optError } = await supabaseClient.from('poll_options').insert(rows);
+                            if (optError) throw optError;
+                        }
+                    }
+
+                    clearCacheKey('txd_polls');
+                    clearCacheKey('txd_poll_options');
+                    clearCacheKey('txd_poll_votes');
+
+                    closeModal('pollModal');
+                    await loadVotacoes();
+                } catch (error) {
+                    console.error('Erro ao salvar votação:', error);
+                    alert(`Erro ao salvar votação: ${error?.message || 'erro desconhecido'}`);
+                }
+            });
+        }
+
+        async function closePoll(pollId) {
+            if (!canManagePolls()) {
+                alert('Você não tem permissão para encerrar votações.');
+                return;
+            }
+            if (!confirm('Encerrar esta votação?')) return;
+            if (!supabaseClient) return;
+
+            return withIdempotency(`poll:close:${pollId}`, async () => {
+                try {
+                    const { error } = await supabaseClient
+                        .from('polls')
+                        .update({ status: 'closed' })
+                        .eq('id', pollId);
+                    if (error) throw error;
+                    clearCacheKey('txd_polls');
+                    await loadVotacoes();
+                } catch (e) {
+                    console.error('Erro ao encerrar votação:', e);
+                    alert('Erro ao encerrar votação.');
+                }
+            });
+        }
+
+        async function deletePoll(pollId) {
+            if (!canManagePolls()) {
+                alert('Você não tem permissão para excluir votações.');
+                return;
+            }
+            if (!confirm('Excluir esta votação? Isso remove opções e votos.')) return;
+            if (!supabaseClient) return;
+
+            return withIdempotency(`poll:delete:${pollId}`, async () => {
+                try {
+                    const { error } = await supabaseClient
+                        .from('polls')
+                        .delete()
+                        .eq('id', pollId);
+                    if (error) throw error;
+                    clearCacheKey('txd_polls');
+                    clearCacheKey('txd_poll_options');
+                    clearCacheKey('txd_poll_votes');
+                    await loadVotacoes();
+                } catch (e) {
+                    console.error('Erro ao excluir votação:', e);
+                    alert('Erro ao excluir votação.');
+                }
+            });
+        }
+
+        async function voteOnPoll(pollId, optionId) {
+            if (!supabaseClient) {
+                alert('Supabase não está disponível.');
+                return;
+            }
+            const voterId = getCurrentVoterId();
+            if (!voterId) {
+                alert('Usuário inválido para votar.');
+                return;
+            }
+
+            return withIdempotency(`poll:vote:${pollId}`, async () => {
+                try {
+                    const [pollsRaw, votesRaw] = await Promise.all([
+                        getData('txd_polls', false),
+                        getData('txd_poll_votes', false)
+                    ]);
+                    const polls = Array.isArray(pollsRaw) ? pollsRaw : [];
+                    const votes = Array.isArray(votesRaw) ? votesRaw : [];
+
+                    const poll = polls.find(p => String(p.id) === String(pollId));
+                    if (!poll) {
+                        alert('Votação não encontrada.');
+                        return;
+                    }
+                    if (!pollIsOpenNow(poll)) {
+                        alert('Esta votação já foi encerrada.');
+                        return;
+                    }
+                    if (!pollRoleIsAllowed(poll, currentUser?.role)) {
+                        alert('Seu cargo não está autorizado a votar nesta votação.');
+                        return;
+                    }
+
+                    const existing = votes.find(v => String(v.pollId ?? v.poll_id) === String(pollId) && String(v.voterId ?? v.voter_id) === voterId);
+                    if (existing) {
+                        alert('Você já votou nesta votação.');
+                        return;
+                    }
+
+                    const { error } = await supabaseClient
+                        .from('poll_votes')
+                        .insert([{
+                            poll_id: pollId,
+                            option_id: optionId,
+                            voter_id: voterId,
+                            voter_name: currentUser?.name || currentUser?.displayName || 'Usuário',
+                            voter_role: currentUser?.role || null
+                        }]);
+                    if (error) throw error;
+
+                    clearCacheKey('txd_poll_votes');
+                    await loadVotacoes();
+                } catch (e) {
+                    console.error('Erro ao votar:', e);
+                    const msg = (e?.message || '').toLowerCase();
+                    if (msg.includes('duplicate') || msg.includes('unique')) {
+                        alert('Você já votou nesta votação.');
+                        return;
+                    }
+                    alert('Erro ao registrar seu voto.');
+                }
+            });
+        }
+
         // Mapeamento de dados necessários por seção (lazy loading)
         const sectionDataMap = {
             'inicio': ['txd_staff', 'txd_system_logs'],
@@ -17326,6 +18016,7 @@ processDiscordCommand() diretamente.
             'dev_create': ['txd_staff'],
             'dev_detail': ['txd_staff'],
             'pendencias': ['txd_pendencies', 'txd_staff'],
+            'votacoes': ['txd_polls', 'txd_poll_options', 'txd_poll_votes', 'txd_staff'],
             'relatorios': ['txd_staff', 'txd_pendencies', 'txd_events'],
             'advertencias': ['txd_staff', 'txd_warnings'],
             'areas': ['txd_areas', 'txd_staff'],
