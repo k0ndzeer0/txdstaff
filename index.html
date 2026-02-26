@@ -2170,7 +2170,7 @@
                     <small style="color: var(--gray-text); font-size: 12px; margin-top: 4px; display: block;">Mínimo 4 caracteres</small>
                 </div>
                 <div class="input-group">
-                    <label>Cargo</label>
+                    <label>Cargo principal</label>
                     <select id="staffRole" required onchange="checkPermissions()">
                         <option value="">Selecione...</option>
                         <option value="Owner">Owner</option>
@@ -2188,6 +2188,31 @@
                         <option value="Helper">Helper</option>
                         <option value="Dev">Dev</option>
                     </select>
+                    <small style="color: var(--gray-text); font-size: 12px; margin-top: 4px; display: block;">
+                        Este é o cargo usado como padrão em telas/relatórios. Você pode adicionar cargos extras abaixo.
+                    </small>
+                </div>
+                <div class="input-group">
+                    <label>Cargos adicionais (opcional)</label>
+                    <select id="staffExtraRoles" multiple size="6" onchange="checkPermissions()">
+                        <option value="Owner">Owner</option>
+                        <option value="CEO">CEO</option>
+                        <option value="COO">COO</option>
+                        <option value="CMO">CMO</option>
+                        <option value="CCO">CCO</option>
+                        <option value="CIO">CIO</option>
+                        <option value="Diretor">Diretor</option>
+                        <option value="Head Staff">Head Staff</option>
+                        <option value="Coordenador">Coordenador</option>
+                        <option value="Admin">Admin</option>
+                        <option value="Moderador">Moderador</option>
+                        <option value="Suporte">Suporte</option>
+                        <option value="Helper">Helper</option>
+                        <option value="Dev">Dev</option>
+                    </select>
+                    <small style="color: var(--gray-text); font-size: 12px; margin-top: 6px; display: block;">
+                        Dica: segure Ctrl (Windows) ou Cmd (Mac) para selecionar mais de 1.
+                    </small>
                 </div>
                 <div class="input-group">
                     <label>Área de Responsabilidade</label>
@@ -2428,6 +2453,15 @@
                     </select>
                     <small style="color: var(--gray-text); font-size: 12px; margin-top: 4px; display: block;">
                         Define quem deve tratar esta pendência. Doações devem ir para C-Level.
+                    </small>
+                </div>
+                <div class="input-group hidden" id="pendencyAssigneeGroup">
+                    <label>Atribuir para (opcional)</label>
+                    <select id="pendencyAssignee">
+                        <option value="">Sem responsável</option>
+                    </select>
+                    <small style="color: var(--gray-text); font-size: 12px; margin-top: 6px; display: block;">
+                        A lista é filtrada automaticamente por destino (DEV/C-Level).
                     </small>
                 </div>
                 <div class="input-group hidden" id="pendencyDevTypeGroup">
@@ -3115,8 +3149,8 @@
                                     const createdByMe = isCurrentUserId(userId);
                                     if (!createdByMe) {
                                         const canSee = destination === 'dev'
-                                            ? isDevRole(currentUser?.role)
-                                            : (destination === 'clevel' ? isCLevelRole(currentUser?.role) : true);
+                                            ? isDevRole(currentUser?.roles || currentUser?.role)
+                                            : (destination === 'clevel' ? isCLevelRole(currentUser?.roles || currentUser?.role) : true);
                                         if (canSee) {
                                             showToast({
                                                 title: '📋 Nova pendência criada',
@@ -3940,9 +3974,25 @@
                             });
                             
                             console.log('Salvando staff no Supabase:', sanitizedData.length, 'registros');
-                            const { data: result, error } = await supabaseClient
+                            const isMissingColumn = (err, col) => {
+                                const msg = (err?.message || '').toString().toLowerCase();
+                                const c = String(col || '').toLowerCase();
+                                return c && msg.includes(c) && (msg.includes('could not find') || msg.includes('does not exist') || msg.includes('schema cache'));
+                            };
+
+                            let { data: result, error } = await supabaseClient
                                 .from('staff')
                                 .upsert(sanitizedData, { onConflict: 'id' });
+
+                            if (error && isMissingColumn(error, 'roles')) {
+                                console.warn('[staff] Coluna roles ausente no Supabase; salvando sem múltiplos cargos. Recomenda-se aplicar a migração para adicionar roles (TEXT[]).', error);
+                                const withoutRoles = sanitizedData.map(({ roles, ...rest }) => rest);
+                                const retry = await supabaseClient
+                                    .from('staff')
+                                    .upsert(withoutRoles, { onConflict: 'id' });
+                                result = retry.data;
+                                error = retry.error;
+                            }
                             
                             if (error) {
                                 console.error('Erro ao salvar staff:', error);
@@ -4593,6 +4643,7 @@
                                     name: foundUser.name || foundUser.display_name || username,
                                     displayName: foundUser.display_name || foundUser.name || username,
                                     role: foundUser.role || 'Helper',
+                                    roles: foundUser.roles || null,
                                     email: foundUser.email || null,
                                     status: foundUser.status || 'Ativo',
                                     password: foundUser.password || null,
@@ -4723,10 +4774,13 @@
                     }
                     
                     // Definir usuário atual
+                    const effectiveRoles = normalizeRoleList(userFound.roles || userFound.role);
+                    const primaryRole = userFound.role || effectiveRoles[0] || 'Owner';
                     currentUser = {
                         id: userFound.id || 1,
                         name: userFound.name || userFound.displayName || username,
-                        role: userFound.role || 'Owner',
+                        role: primaryRole,
+                        roles: effectiveRoles.length > 0 ? effectiveRoles : [primaryRole],
                         email: userFound.email || null,
                         displayName: userFound.displayName || userFound.name || username,
                         status: userFound.status || 'Ativo',
@@ -4737,7 +4791,7 @@
                     };
                     
                     // Aplicar permissões ao menu
-                    const permissions = getUserPermissions(currentUser.role);
+                    const permissions = getUserPermissionsForRoles(currentUser.roles || currentUser.role);
                     applyPermissionsToMenu(permissions);
                     renderDevMenuItem();
                     
@@ -5080,8 +5134,9 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                     `;
                 }
                 
-                // Atualizar título
-                document.getElementById('sectionTitle').textContent = 'Acesso Negado';
+                // Atualizar título (se existir no DOM atual)
+                const titleElDenied = document.getElementById('sectionTitle');
+                if (titleElDenied) titleElDenied.textContent = 'Acesso Negado';
                 
                 // Atualizar menu ativo (remover ativo de todos)
                 document.querySelectorAll('.nav-menu a').forEach(link => {
@@ -5111,7 +5166,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 'votacoes': '🗳️ Votações',
                 'config': 'Configurações do Sistema'
             };
-            document.getElementById('sectionTitle').textContent = titles[section] || 'Painel TXD Staff';
+            const titleEl = document.getElementById('sectionTitle');
+            if (titleEl) titleEl.textContent = titles[section] || 'Painel TXD Staff';
             
             // Atualizar menu ativo
             document.querySelectorAll('.nav-menu a').forEach(link => {
@@ -5172,9 +5228,36 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         };
 
         // Usuário atual (será definido no login)
-        let currentUser = { role: 'Owner', name: 'Admin', id: 1 };
+        let currentUser = { role: 'Owner', roles: ['Owner'], name: 'Admin', id: 1 };
 
         // ========== FUNÇÕES DE PERMISSÕES ==========
+
+        function normalizeRoleList(roleOrRoles) {
+            if (Array.isArray(roleOrRoles)) {
+                return roleOrRoles
+                    .map(r => (r ?? '').toString().trim())
+                    .filter(Boolean);
+            }
+            const raw = (roleOrRoles ?? '').toString().trim();
+            if (!raw) return [];
+            // Suporta formatos antigos (ex: "Owner, Dev")
+            if (raw.includes(',')) {
+                return raw
+                    .split(',')
+                    .map(s => s.trim())
+                    .filter(Boolean);
+            }
+            return [raw];
+        }
+
+        function canonicalizeRoleKey(role) {
+            const raw = (role ?? '').toString().trim();
+            if (!raw) return '';
+            if (ROLE_PERMISSIONS[raw]) return raw;
+            const noSpaces = raw.replace(/\s+/g, '');
+            if (ROLE_PERMISSIONS[noSpaces]) return noSpaces;
+            return raw;
+        }
         
         /**
          * Obtém as permissões do cargo do usuário
@@ -5183,17 +5266,28 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
          */
         function getUserPermissions(role) {
             if (!role) return [];
-            return ROLE_PERMISSIONS[role] || [];
+            const key = canonicalizeRoleKey(role);
+            return ROLE_PERMISSIONS[key] || [];
+        }
+
+        function getUserPermissionsForRoles(roleOrRoles) {
+            const roles = normalizeRoleList(roleOrRoles);
+            const out = new Set();
+            for (const r of roles) {
+                for (const p of getUserPermissions(r)) out.add(p);
+            }
+            return Array.from(out);
         }
 
         function isDevRole(role) {
-            const normalized = (role || '').toString().toLowerCase();
-            return normalized === 'dev';
+            return normalizeRoleList(role).some(r => (r || '').toString().toLowerCase() === 'dev');
         }
 
         function isCLevelRole(role) {
-            const normalized = (role || '').toString().toLowerCase();
-            return ['owner', 'ceo', 'coo', 'cmo', 'cco', 'cio', 'c_level'].includes(normalized);
+            return normalizeRoleList(role).some(r => {
+                const normalized = (r || '').toString().toLowerCase();
+                return ['owner', 'ceo', 'coo', 'cmo', 'cco', 'cio', 'c_level'].includes(normalized);
+            });
         }
 
         function getPendencyScope(type) {
@@ -5213,7 +5307,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
          * @returns {boolean} true se tem acesso, false caso contrário
          */
         function canAccess(section) {
-            if (!currentUser || !currentUser.role) {
+            if (!currentUser || (!currentUser.role && !currentUser.roles)) {
                 return false;
             }
 
@@ -5222,11 +5316,11 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 return true;
             }
 
-            const userPermissions = getUserPermissions(currentUser.role);
+            const userPermissions = getUserPermissionsForRoles(currentUser.roles || currentUser.role);
 
             // DEV também pode visualizar a seção "Tarefas" (Kanban) sem precisar de permissão "dashboard"
             // (mantém as regras de criar/editar/excluir controladas por hasPermission('task.*') onde aplicável)
-            if (section === 'tarefas' && (isDevRole(currentUser.role) || userPermissions.includes('dev_area'))) {
+            if (section === 'tarefas' && (isDevRole(currentUser.roles || currentUser.role) || userPermissions.includes('dev_area'))) {
                 return true;
             }
             
@@ -5237,7 +5331,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             }
 
             if (requiredPermission === 'dev_area') {
-                return userPermissions.includes('*') || userPermissions.includes('dev_area') || isDevRole(currentUser.role);
+                return userPermissions.includes('*') || userPermissions.includes('dev_area') || isDevRole(currentUser.roles || currentUser.role);
             }
 
             // Se tem '*', tem acesso total (exceto regras especiais como dev_area acima)
@@ -5379,11 +5473,11 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
 
         // Função de compatibilidade para código existente que usa hasPermission
         function hasPermission(action) {
-            if (!currentUser || !currentUser.role) {
+            if (!currentUser || (!currentUser.role && !currentUser.roles)) {
                 return false;
             }
             
-            const userPermissions = getUserPermissions(currentUser.role);
+            const userPermissions = getUserPermissionsForRoles(currentUser.roles || currentUser.role);
             
             // Se tem '*', tem todas as permissões
             if (userPermissions.includes('*')) {
@@ -5446,7 +5540,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
 
         // Obter todas as permissões do cargo atual (compatibilidade)
         function getCurrentUserPermissions() {
-            return getUserPermissions(currentUser?.role);
+            return getUserPermissionsForRoles(currentUser?.roles || currentUser?.role);
         }
 
         // Obter permissões de um cargo específico
@@ -5466,10 +5560,12 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         // Função para verificar permissões quando cargo muda
         function checkPermissions() {
             const role = document.getElementById('staffRole')?.value;
-            if (role) {
-                const rolePerms = getRolePermissions(role);
-                const roleDesc = getUserPermissions(role).includes('*') ? 'Acesso total' : `${getUserPermissions(role).length} permissões`;
-                console.log(`Permissões do cargo ${role}:`, rolePerms);
+            const extras = Array.from(document.getElementById('staffExtraRoles')?.selectedOptions || []).map(o => o.value);
+            const roles = [role, ...extras].filter(Boolean);
+            if (roles.length > 0) {
+                const perms = getUserPermissionsForRoles(roles);
+                const roleDesc = perms.includes('*') ? 'Acesso total' : `${perms.length} permissões`;
+                console.log(`Permissões (cargos: ${roles.join(' + ')}):`, perms);
                 console.log(`Descrição: ${roleDesc}`);
             }
         }
@@ -6007,7 +6103,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 return status === 'pending';
             });
             
-            const canManage = hasPermission('staff.create') || currentUser.role === 'Owner' || currentUser.role === 'CEO' || currentUser.role === 'HeadStaff';
+            const currentRoles = normalizeRoleList(currentUser?.roles || currentUser?.role);
+            const canManage = hasPermission('staff.create') || isCLevelRole(currentRoles) || currentRoles.some(r => canonicalizeRoleKey(r) === 'HeadStaff');
             
             const content = `
                 <h1 id="sectionTitle">Controle de Staff</h1>
@@ -6078,7 +6175,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                             ${staffData.map(member => `
                                 <tr style="border-top: 1px solid var(--gray-border);">
                                     <td style="padding: 12px; color: var(--white-soft);">${member.name}</td>
-                                    <td style="padding: 12px; color: var(--gray-light);">${member.role}</td>
+                                    <td style="padding: 12px; color: var(--gray-light);">${(getStaffRoles(member).join(' + ') || member.role || '')}</td>
                                     <td style="padding: 12px; color: var(--gray-light);">${member.area}</td>
                                     <td style="padding: 12px;">
                                         <span class="badge badge-success">${member.status}</span>
@@ -8356,8 +8453,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             await loadSectionData('pendencias');
             await ensurePendenciesLoaded(false);
             const pendencies = Array.from(state.pendencies.byId.values());
-            const isCLevel = isCLevelRole(currentUser?.role);
-            const isDev = isDevRole(currentUser?.role);
+            const isCLevel = isCLevelRole(currentUser?.roles || currentUser?.role);
+            const isDev = isDevRole(currentUser?.roles || currentUser?.role);
             const canViewAll = hasPermission('pendency.view_all') || hasPermission('dashboard') || isCLevel;
 
             const currentUserId = String(currentUser?.id ?? '');
@@ -8653,6 +8750,12 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             const isDevDestination = area === 'dev';
             const normalizedStatus = normalizePendencyStatusValue(pendency?.status, pendency);
             const isActuallyCompleted = isCompleted || normalizedStatus === 'completed';
+            const assignedUserId = String(pendency?.assignedUserId ?? pendency?.assigned_user_id ?? '').trim();
+            const assignedUserName = (pendency?.assignedUserName ?? pendency?.assigned_user_name ?? '').toString().trim();
+            const assignedLabel = assignedUserName
+                ? assignedUserName
+                : (assignedUserId ? `ID ${assignedUserId}` : 'Sem responsável');
+            const shouldShowAssignee = area === 'dev' || area === 'clevel' || assignedUserName || assignedUserId;
             const statusLabels = {
                 'pending': 'Pendente',
                 'in_progress': 'Em Andamento',
@@ -8686,6 +8789,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                             </div>
                             <div style="display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--gray-light);">
                                 <span><i class="fas fa-user"></i> ${pendency.userName || pendency.user_name || 'N/A'}</span>
+                                ${shouldShowAssignee ? `<span><i class="fas fa-user-check"></i> ${assignedLabel}</span>` : ''}
                                 <span><i class="fas fa-tag"></i> ${typeLabel}</span>
                                 <span><i class="fas fa-calendar"></i> ${createdAt.toLocaleDateString('pt-BR')}</span>
                                 ${dueDate ? `<span style="color: ${isOverdue ? 'var(--danger)' : 'var(--gray-light)'};"><i class="fas fa-clock"></i> Vence: ${new Date(dueDate).toLocaleDateString('pt-BR')}</span>` : ''}
@@ -11364,9 +11468,9 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                         <i class="fas fa-eye"></i> Preview: Suas Permissões
                     </h2>
                     <div style="background: var(--black-dark); border-radius: 8px; padding: 16px;">
-                        <p style="color: var(--white-soft); font-weight: 600; margin-bottom: 8px;">Cargo: ${currentUser.role}</p>
+                        <p style="color: var(--white-soft); font-weight: 600; margin-bottom: 8px;">Cargo(s): ${(normalizeRoleList(currentUser.roles || currentUser.role).join(' + ') || currentUser.role)}</p>
                         <p style="color: var(--gray-light); font-size: 14px; margin-bottom: 16px;">
-                            ${getUserPermissions(currentUser.role).includes('*') ? 'Acesso total ao sistema' : `${getUserPermissions(currentUser.role).length} permissões ativas`}
+                            ${getCurrentUserPermissions().includes('*') ? 'Acesso total ao sistema' : `${getCurrentUserPermissions().length} permissões ativas`}
                         </p>
                         <div style="display: flex; flex-wrap: wrap; gap: 8px;">
                             ${getCurrentUserPermissions().map(perm => `
@@ -13117,6 +13221,72 @@ processDiscordCommand() diretamente.
 
         function handlePendencyDestinationChange() {
             pendencyDestinationTouched = true;
+            updatePendencyAssigneeOptions();
+        }
+
+        function getStaffRoles(member) {
+            if (!member) return [];
+            const roles = member.roles ?? member.staff_roles ?? member.staffRoles ?? member.staff_roles;
+            const list = normalizeRoleList(roles);
+            if (list.length > 0) return list;
+            const single = member.role ?? member.memberRole ?? member.member_role;
+            return normalizeRoleList(single);
+        }
+
+        function getStaffDisplayName(member) {
+            return (member?.displayName || member?.display_name || member?.name || '').toString().trim();
+        }
+
+        function isActiveStaffMember(member) {
+            const status = (member?.status || '').toString().toLowerCase().trim();
+            return status !== 'inativo' && status !== 'inactive' && status !== 'desativado';
+        }
+
+        function updatePendencyAssigneeOptions() {
+            const destination = (document.getElementById('pendencyDestination')?.value || '').toString().toLowerCase().trim();
+            const group = document.getElementById('pendencyAssigneeGroup');
+            const select = document.getElementById('pendencyAssignee');
+            if (!group || !select) return;
+
+            const shouldShow = destination === 'dev' || destination === 'clevel';
+            if (!shouldShow) {
+                group.classList.add('hidden');
+                select.value = '';
+                return;
+            }
+
+            group.classList.remove('hidden');
+
+            const previouslySelected = (select.value || '').toString();
+            select.innerHTML = '<option value=\"\">Sem responsável</option>';
+
+            const list = Array.isArray(staffData) ? staffData : [];
+            const filtered = list
+                .filter(isActiveStaffMember)
+                .filter(m => {
+                    const roles = getStaffRoles(m);
+                    if (destination === 'dev') return roles.some(r => (r || '').toString().toLowerCase() === 'dev');
+                    if (destination === 'clevel') return isCLevelRole(roles);
+                    return true;
+                })
+                .sort((a, b) => getStaffDisplayName(a).localeCompare(getStaffDisplayName(b), 'pt-BR'));
+
+            for (const m of filtered) {
+                const id = (m.id ?? m.user_id ?? m.userId ?? '').toString();
+                const name = getStaffDisplayName(m);
+                if (!id || !name) continue;
+                const rolesLabel = getStaffRoles(m).join(' + ');
+                const opt = document.createElement('option');
+                opt.value = id;
+                opt.textContent = rolesLabel ? `${name} (${rolesLabel})` : name;
+                select.appendChild(opt);
+            }
+
+            // Tenta restaurar seleção anterior quando fizer sentido
+            if (previouslySelected) {
+                const exists = Array.from(select.options).some(o => o.value === previouslySelected);
+                if (exists) select.value = previouslySelected;
+            }
         }
 
         function handlePendencyTypeChange() {
@@ -13155,6 +13325,8 @@ processDiscordCommand() diretamente.
                 else if (type === 'doacoes') destinationSelect.value = 'clevel';
                 else destinationSelect.value = 'geral';
             }
+
+            updatePendencyAssigneeOptions();
         }
 
         function handleDonationItemChange() {
@@ -13181,6 +13353,7 @@ processDiscordCommand() diretamente.
             const today = new Date().toISOString().split('T')[0];
             document.getElementById('pendencyDueDate').setAttribute('min', today);
             handlePendencyTypeChange();
+            updatePendencyAssigneeOptions();
             document.getElementById('pendencyModal').classList.add('active');
         }
         
@@ -13265,12 +13438,16 @@ processDiscordCommand() diretamente.
                         ? (existing.attachments._meta || existing.attachments.meta || null)
                         : null;
 
+                    const assigneeId = (document.getElementById('pendencyAssignee')?.value || '').toString().trim();
+                    const assignee = assigneeId ? (Array.isArray(staffData) ? staffData.find(m => String(m?.id) === String(assigneeId)) : null) : null;
                     const assignedRole = destination === 'dev' ? 'dev' : null;
                     const meta = {
                         destination,
                         assignedRole,
+                        assignedUserId: assigneeId || null,
+                        assignedUserName: assignee ? getStaffDisplayName(assignee) : null,
                         createdByUserId: String(currentUser.id),
-                        createdByRole: String(currentUser.role || ''),
+                        createdByRole: String(currentUser.role || (normalizeRoleList(currentUser.roles || [])[0] || '')),
                         createdByName: String(currentUser.displayName || currentUser.name || ''),
                         clientRequestId: pendencyId ? `pendency:${pendencyId}` : `pendency:new:${Date.now()}`
                     };
@@ -13284,6 +13461,10 @@ processDiscordCommand() diretamente.
                         priority: priority,
                         due_date: dueDate || null,
                         created_by: String(currentUser.id),
+                        destination: destination,
+                        assigned_role: destination === 'dev' ? 'dev' : (destination === 'clevel' ? 'clevel' : null),
+                        assigned_user_id: assigneeId || null,
+                        assigned_user_name: assignee ? getStaffDisplayName(assignee) : null,
                         // `attachments` é JSONB na tabela padrão. Guardamos o destino aqui para roteamento sem migração.
                         attachments: {
                             ...(existing?.attachments && typeof existing.attachments === 'object' ? existing.attachments : {}),
@@ -13292,15 +13473,31 @@ processDiscordCommand() diretamente.
                     };
 
                     let savedRow = null;
-                    const isMissingAttachmentsColumn = (err) => {
+                    const isMissingColumn = (err, col) => {
                         const msg = (err?.message || '').toString().toLowerCase();
-                        return msg.includes('attachments') && (msg.includes('could not find') || msg.includes('does not exist') || msg.includes('schema cache'));
+                        const c = String(col || '').toLowerCase();
+                        return c && msg.includes(c) && (msg.includes('could not find') || msg.includes('does not exist') || msg.includes('schema cache'));
                     };
+                    const isMissingAttachmentsColumn = (err) => isMissingColumn(err, 'attachments');
+                    const isMissingRoutingColumns = (err) => (
+                        isMissingColumn(err, 'destination') ||
+                        isMissingColumn(err, 'assigned_role') ||
+                        isMissingColumn(err, 'assigned_user_id') ||
+                        isMissingColumn(err, 'assigned_user_name')
+                    );
                     const payloadNoAttachments = (() => {
                         const copy = { ...payloadBase };
                         delete copy.attachments;
                         return copy;
                     })();
+                    const stripRoutingFields = (payload) => {
+                        const copy = { ...payload };
+                        delete copy.destination;
+                        delete copy.assigned_role;
+                        delete copy.assigned_user_id;
+                        delete copy.assigned_user_name;
+                        return copy;
+                    };
                     if (pendencyId) {
                         const doUpdate = async (payload) => supabaseClient
                             .from('pendencies')
@@ -13309,10 +13506,17 @@ processDiscordCommand() diretamente.
                             .select('*')
                             .single();
 
-                        let result = await doUpdate(payloadBase);
+                        let payloadAttempt = payloadBase;
+                        let result = await doUpdate(payloadAttempt);
                         if (result.error && isMissingAttachmentsColumn(result.error)) {
                             console.warn('[pendencies] Coluna attachments ausente; salvando sem destino/meta. Recomenda-se adicionar JSONB attachments.', result.error);
-                            result = await doUpdate(payloadNoAttachments);
+                            payloadAttempt = payloadNoAttachments;
+                            result = await doUpdate(payloadAttempt);
+                        }
+                        if (result.error && isMissingRoutingColumns(result.error)) {
+                            console.warn('[pendencies] Colunas de atribuição/destino ausentes; salvando sem assigned_* e destination. Recomenda-se aplicar a migração.', result.error);
+                            payloadAttempt = stripRoutingFields(payloadAttempt);
+                            result = await doUpdate(payloadAttempt);
                         }
                         if (result.error) {
                             console.error('[pendencies] Erro ao atualizar:', { pendencyId, error: result.error, payloadBase });
@@ -13326,10 +13530,17 @@ processDiscordCommand() diretamente.
                             .select('*')
                             .single();
 
-                        let result = await doInsert(payloadBase);
+                        let payloadAttempt = payloadBase;
+                        let result = await doInsert(payloadAttempt);
                         if (result.error && isMissingAttachmentsColumn(result.error)) {
                             console.warn('[pendencies] Coluna attachments ausente; salvando sem destino/meta. Recomenda-se adicionar JSONB attachments.', result.error);
-                            result = await doInsert(payloadNoAttachments);
+                            payloadAttempt = payloadNoAttachments;
+                            result = await doInsert(payloadAttempt);
+                        }
+                        if (result.error && isMissingRoutingColumns(result.error)) {
+                            console.warn('[pendencies] Colunas de atribuição/destino ausentes; salvando sem assigned_* e destination. Recomenda-se aplicar a migração.', result.error);
+                            payloadAttempt = stripRoutingFields(payloadAttempt);
+                            result = await doInsert(payloadAttempt);
                         }
                         if (result.error) {
                             console.error('[pendencies] Erro ao inserir:', { error: result.error, payloadBase });
@@ -13397,7 +13608,7 @@ processDiscordCommand() diretamente.
         }
         
         async function approvePendency(pendencyId) {
-            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.roles || currentUser?.role) && !isDevRole(currentUser?.roles || currentUser?.role)) {
                 alert('Você não tem permissão para aprovar pendências.');
                 return;
             }
@@ -13414,12 +13625,12 @@ processDiscordCommand() diretamente.
                 }
 
                 const scope = getPendencyScope(directPendency.type);
-                if (scope === 'financial' && !isCLevelRole(currentUser?.role)) {
+                if (scope === 'financial' && !isCLevelRole(currentUser?.roles || currentUser?.role)) {
                     alert('Pendências financeiras só podem ser aprovadas por C-Level.');
                     return;
                 }
 
-                if (scope === 'dev' && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+                if (scope === 'dev' && !isCLevelRole(currentUser?.roles || currentUser?.role) && !isDevRole(currentUser?.roles || currentUser?.role)) {
                     alert('Pendências de desenvolvimento só podem ser aprovadas por Desenvolvedores ou C-Level.');
                     return;
                 }
@@ -13479,7 +13690,7 @@ processDiscordCommand() diretamente.
         }
         
         async function rejectPendency(pendencyId) {
-            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.roles || currentUser?.role) && !isDevRole(currentUser?.roles || currentUser?.role)) {
                 alert('Você não tem permissão para rejeitar pendências.');
                 return;
             }
@@ -13500,12 +13711,12 @@ processDiscordCommand() diretamente.
                 }
 
                 const scope = getPendencyScope(directPendency.type);
-                if (scope === 'financial' && !isCLevelRole(currentUser?.role)) {
+                if (scope === 'financial' && !isCLevelRole(currentUser?.roles || currentUser?.role)) {
                     alert('Pendências financeiras só podem ser rejeitadas por C-Level.');
                     return;
                 }
 
-                if (scope === 'dev' && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+                if (scope === 'dev' && !isCLevelRole(currentUser?.roles || currentUser?.role) && !isDevRole(currentUser?.roles || currentUser?.role)) {
                     alert('Pendências de desenvolvimento só podem ser rejeitadas por Desenvolvedores ou C-Level.');
                     return;
                 }
@@ -13566,7 +13777,7 @@ processDiscordCommand() diretamente.
         }
         
         async function startPendency(pendencyId) {
-            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.roles || currentUser?.role) && !isDevRole(currentUser?.roles || currentUser?.role)) {
                 alert('Você não tem permissão para iniciar pendências.');
                 return;
             }
@@ -13582,11 +13793,11 @@ processDiscordCommand() diretamente.
                 }
                 
                 const scope = getPendencyScope(directPendency.type);
-                if (scope === 'financial' && !isCLevelRole(currentUser?.role)) {
+                if (scope === 'financial' && !isCLevelRole(currentUser?.roles || currentUser?.role)) {
                     alert('Pendências financeiras só podem ser iniciadas por C-Level.');
                     return;
                 }
-                if (scope === 'dev' && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+                if (scope === 'dev' && !isCLevelRole(currentUser?.roles || currentUser?.role) && !isDevRole(currentUser?.roles || currentUser?.role)) {
                     alert('Pendências de desenvolvimento só podem ser iniciadas por Desenvolvedores ou C-Level.');
                     return;
                 }
@@ -13636,7 +13847,7 @@ processDiscordCommand() diretamente.
         }
         
         async function completePendency(pendencyId) {
-            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+            if (!hasPermission('pendency.approve') && !hasPermission('dashboard') && !isCLevelRole(currentUser?.roles || currentUser?.role) && !isDevRole(currentUser?.roles || currentUser?.role)) {
                 alert('Você não tem permissão para concluir pendências.');
                 return;
             }
@@ -13671,11 +13882,11 @@ processDiscordCommand() diretamente.
                 }
                 
                 const scope = getPendencyScope(directPendency.type);
-                if (scope === 'financial' && !isCLevelRole(currentUser?.role)) {
+                if (scope === 'financial' && !isCLevelRole(currentUser?.roles || currentUser?.role)) {
                     alert('Pendências financeiras só podem ser concluídas por C-Level.');
                     return;
                 }
-                if (scope === 'dev' && !isCLevelRole(currentUser?.role) && !isDevRole(currentUser?.role)) {
+                if (scope === 'dev' && !isCLevelRole(currentUser?.roles || currentUser?.role) && !isDevRole(currentUser?.roles || currentUser?.role)) {
                     alert('Pendências de desenvolvimento só podem ser concluídas por Desenvolvedores ou C-Level.');
                     return;
                 }
@@ -13761,7 +13972,7 @@ processDiscordCommand() diretamente.
                 : null;
             const assignedUserId = meta?.assignedUserId ?? meta?.assigned_user_id ?? pendency.assignedUserId ?? pendency.assigned_user_id ?? null;
             const assignedUserName = meta?.assignedUserName ?? meta?.assigned_user_name ?? meta?.assignedByName ?? pendency.assignedUserName ?? pendency.assigned_user_name ?? null;
-            const canManage = hasPermission('pendency.approve') || hasPermission('dashboard') || isCLevelRole(currentUser?.role) || isDevRole(currentUser?.role);
+            const canManage = hasPermission('pendency.approve') || hasPermission('dashboard') || isCLevelRole(currentUser?.roles || currentUser?.role) || isDevRole(currentUser?.roles || currentUser?.role);
             const isRequester = isCurrentUserId(pendency.userId ?? pendency.user_id);
             const isAssignedToMe = assignedUserId ? isCurrentUserId(assignedUserId) : false;
             const canAssume = canManage && !isRequester && (!assignedUserId || !isAssignedToMe);
@@ -13927,7 +14138,7 @@ processDiscordCommand() diretamente.
                 return;
             }
 
-            const canManage = hasPermission('pendency.approve') || hasPermission('dashboard') || isCLevelRole(currentUser?.role) || isDevRole(currentUser?.role);
+            const canManage = hasPermission('pendency.approve') || hasPermission('dashboard') || isCLevelRole(currentUser?.roles || currentUser?.role) || isDevRole(currentUser?.roles || currentUser?.role);
             if (!canManage) {
                 alert('Você não tem permissão para assumir esta pendência.');
                 return;
@@ -13968,12 +14179,46 @@ processDiscordCommand() diretamente.
 
                     const mergedAttachments = mergePendencyAttachmentsMeta(pendency.attachments, patch);
 
-                    const { data: saved, error } = await supabaseClient
+                    const isMissingColumn = (err, col) => {
+                        const msg = (err?.message || '').toString().toLowerCase();
+                        const c = String(col || '').toLowerCase();
+                        return c && msg.includes(c) && (msg.includes('could not find') || msg.includes('does not exist') || msg.includes('schema cache'));
+                    };
+
+                    // Preferir salvar nos campos dedicados quando existirem (e manter meta em attachments para compatibilidade)
+                    const updateBase = {
+                        destination: 'dev',
+                        assigned_role: 'dev',
+                        assigned_user_id: myId,
+                        assigned_user_name: patch.assignedUserName,
+                        attachments: mergedAttachments
+                    };
+
+                    const attemptUpdate = async (payload) => supabaseClient
                         .from('pendencies')
-                        .update({ attachments: mergedAttachments })
+                        .update(payload)
                         .eq('id', pid)
                         .select('*')
                         .single();
+
+                    let { data: saved, error } = await attemptUpdate(updateBase);
+                    if (error && (
+                        isMissingColumn(error, 'destination') ||
+                        isMissingColumn(error, 'assigned_role') ||
+                        isMissingColumn(error, 'assigned_user_id') ||
+                        isMissingColumn(error, 'assigned_user_name')
+                    )) {
+                        console.warn('[pendencies] Colunas de atribuição/destino ausentes; assumindo apenas via attachments._meta.', error);
+                        ({ data: saved, error } = await attemptUpdate({ attachments: mergedAttachments }));
+                    } else if (error && isMissingColumn(error, 'attachments')) {
+                        console.warn('[pendencies] Coluna attachments ausente; assumindo apenas via colunas assigned_*.', error);
+                        ({ data: saved, error } = await attemptUpdate({
+                            destination: 'dev',
+                            assigned_role: 'dev',
+                            assigned_user_id: myId,
+                            assigned_user_name: patch.assignedUserName
+                        }));
+                    }
 
                     if (error) throw error;
 
@@ -14326,6 +14571,20 @@ processDiscordCommand() diretamente.
                 document.getElementById('staffModalTitle').textContent = 'Editar Membro';
                 document.getElementById('staffName').value = member.name;
                 document.getElementById('staffRole').value = member.role;
+                // Selecionar cargos adicionais (se houver)
+                try {
+                    const extrasSelect = document.getElementById('staffExtraRoles');
+                    if (extrasSelect) {
+                        const roles = getStaffRoles(member);
+                        const primary = (member.role || '').toString().trim();
+                        const extras = roles.filter(r => r && r !== primary);
+                        Array.from(extrasSelect.options).forEach(opt => {
+                            opt.selected = extras.includes(opt.value);
+                        });
+                    }
+                } catch (e) {
+                    console.warn('Falha ao carregar cargos adicionais:', e);
+                }
                 document.getElementById('staffArea').value = member.area;
                 document.getElementById('staffStatus').value = member.status;
                 document.getElementById('staffEmail').value = member.email || '';
@@ -14374,10 +14633,17 @@ processDiscordCommand() diretamente.
                 }
             }
             
+            const primaryRole = document.getElementById('staffRole').value;
+            const extraRoles = Array.from(document.getElementById('staffExtraRoles')?.selectedOptions || [])
+                .map(o => o.value)
+                .filter(Boolean);
+            const roles = Array.from(new Set([primaryRole, ...extraRoles].filter(Boolean)));
+
             const staffMember = {
                 id: isEdit ? parseInt(isEdit) : Date.now(),
                 name: document.getElementById('staffName').value,
-                role: document.getElementById('staffRole').value,
+                role: primaryRole,
+                roles,
                 area: document.getElementById('staffArea').value,
                 status: document.getElementById('staffStatus').value,
                 email: document.getElementById('staffEmail').value
@@ -14397,13 +14663,16 @@ processDiscordCommand() diretamente.
                 if (index !== -1) {
                     staffData[index] = staffMember;
                 }
+                const roleLabel = (Array.isArray(staffMember.roles) && staffMember.roles.length > 0)
+                    ? staffMember.roles.join(' + ')
+                    : (staffMember.role || '');
                 
                 // Notificar Discord sobre edição
                 sendDiscordNotification('staff', '✏️ Staff Editado', 
                     `${currentUser.name} editou informações de um membro`,
                     [
                         { name: '👤 Membro', value: staffMember.name, inline: true },
-                        { name: '🎖️ Cargo', value: staffMember.role, inline: true },
+                        { name: '🎖️ Cargo', value: roleLabel || staffMember.role, inline: true },
                         { name: '📊 Status', value: staffMember.status, inline: true },
                         { name: '🏢 Área', value: staffMember.area, inline: false },
                         { name: '👨‍💼 Editado por', value: currentUser.name, inline: false }
@@ -14411,13 +14680,16 @@ processDiscordCommand() diretamente.
                 );
             } else {
                 staffData.push(staffMember);
+                const roleLabel = (Array.isArray(staffMember.roles) && staffMember.roles.length > 0)
+                    ? staffMember.roles.join(' + ')
+                    : (staffMember.role || '');
                 
                 // Notificar Discord sobre novo membro
                 sendDiscordNotification('staff', '✨ Novo Membro Adicionado', 
                     `${currentUser.name} adicionou um novo membro à equipe`,
                     [
                         { name: '👤 Nome', value: staffMember.name, inline: true },
-                        { name: '🎖️ Cargo', value: staffMember.role, inline: true },
+                        { name: '🎖️ Cargo', value: roleLabel || staffMember.role, inline: true },
                         { name: '📊 Status', value: staffMember.status, inline: true },
                         { name: '🏢 Área', value: staffMember.area, inline: false },
                         { name: '📧 E-mail', value: staffMember.email, inline: false },
@@ -15322,8 +15594,8 @@ processDiscordCommand() diretamente.
 
             if (audience === 'all' || audience === '*' || audience === 'staff') return true;
             // "dev" deve ser somente DEV (não inclui C-Level)
-            if (audience === 'dev') return isDevRole(currentUser?.role);
-            if (audience === 'clevel' || audience === 'c_level') return isCLevelRole(currentUser?.role);
+            if (audience === 'dev') return isDevRole(currentUser?.roles || currentUser?.role);
+            if (audience === 'clevel' || audience === 'c_level') return isCLevelRole(currentUser?.roles || currentUser?.role);
             if (audience === 'user') return userId && isSameUserId(notification.audienceUserId ?? notification.audience_user_id, userId);
             return false;
         }
@@ -16057,13 +16329,15 @@ processDiscordCommand() diretamente.
             return {
                 id: currentUser.id,
                 name: currentUser.displayName || currentUser.name || 'Usuario',
-                role: currentUser.role || 'Staff'
+                role: currentUser.role || 'Staff',
+                roles: normalizeRoleList(currentUser.roles || currentUser.role)
             };
         }
 
         function canViewAllIssues(profile) {
-            const role = (profile?.role || currentUser?.role || '').toString().toLowerCase();
-            return isDevRole(role);
+            const roleOrRoles = profile?.roles || profile?.role || currentUser?.roles || currentUser?.role;
+            const permissions = getUserPermissionsForRoles(roleOrRoles);
+            return permissions.includes('*') || permissions.includes('dev_area') || isDevRole(roleOrRoles);
         }
 
         function canManageIssues(profile) {
@@ -16099,7 +16373,7 @@ processDiscordCommand() diretamente.
         async function fetchAssignees() {
             const staffList = Array.isArray(staffData) ? staffData : [];
             return staffList
-                .filter(member => isDevRole((member.role || '').toString().toLowerCase()))
+                .filter(member => isDevRole(getStaffRoles(member)))
                 .map(member => ({
                     id: member.id || member.name,
                     display_name: member.displayName || member.name || member.login || 'Dev'
@@ -16518,12 +16792,91 @@ processDiscordCommand() diretamente.
                 return;
             }
 
+            // Pendências DEV também entram no fluxo do DEV (triagem -> conversão em tarefa)
+            try {
+                await ensurePendenciesLoaded(false);
+            } catch (e) {
+                console.warn('[dev_backlog] falha ao carregar pendências:', e);
+            }
+
+            const devPendencies = Array.from(state?.pendencies?.byId?.values?.() || [])
+                .filter(p => getEffectivePendencyArea(p) === 'dev')
+                .filter(p => {
+                    const st = normalizePendencyStatusValue(p?.status, p);
+                    return st !== 'completed' && st !== 'rejected';
+                })
+                .sort((a, b) => {
+                    const aTime = new Date(a.createdAt || a.created_at || 0).getTime();
+                    const bTime = new Date(b.createdAt || b.created_at || 0).getTime();
+                    return bTime - aTime;
+                });
+
+            const renderDevPendencyRow = (p) => {
+                const status = normalizePendencyStatusValue(p?.status, p);
+                const statusLabel = status === 'pending' ? 'Pendente' : status === 'approved' ? 'Aprovada' : status === 'in_progress' ? 'Em andamento' : status;
+                const assigned = (p?.assignedUserName || p?.assigned_user_name || '').toString().trim() || 'Sem responsável';
+                const createdAt = p?.createdAt || p?.created_at || null;
+                const createdLabel = createdAt ? new Date(createdAt).toLocaleDateString('pt-BR') : '';
+                const type = (p?.type || '').toString();
+                const typeLabel = type ? type.toUpperCase() : 'DEV';
+                return `
+                    <div style="display:flex; justify-content: space-between; gap: 12px; align-items:flex-start; padding: 12px; border-radius: 12px; background: var(--gray-medium); border: 1px solid var(--gray-border);">
+                        <div style="min-width: 220px; flex: 1;">
+                            <div style="display:flex; gap: 10px; flex-wrap: wrap; align-items:center;">
+                                <div style="color: var(--white-soft); font-weight: 800;">#${escapeHtml(String(p.id || ''))} • ${escapeHtml(p.title || 'Sem título')}</div>
+                                <span style="padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 800; background: rgba(0,168,255,.12); border: 1px solid rgba(0,168,255,.35); color: var(--primary);">${escapeHtml(typeLabel)}</span>
+                                <span style="padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 800; background: rgba(255,170,0,.10); border: 1px solid rgba(255,170,0,.35); color: var(--warning);">${escapeHtml(statusLabel)}</span>
+                            </div>
+                            <div style="margin-top: 8px; color: var(--gray-text); font-size: 12px; display:flex; gap: 14px; flex-wrap: wrap;">
+                                <span><i class="fas fa-user"></i> ${escapeHtml(p.userName || p.user_name || 'N/A')}</span>
+                                <span><i class="fas fa-user-check"></i> ${escapeHtml(assigned)}</span>
+                                ${createdLabel ? `<span><i class="fas fa-calendar"></i> ${escapeHtml(createdLabel)}</span>` : ``}
+                            </div>
+                        </div>
+                        <div style="display:flex; gap: 8px; flex-wrap: wrap; align-items:center;">
+                            <button type="button" class="btn btn-secondary" style="width:auto; padding: 10px 12px;" onclick="viewPendencyDetails(${Number(p.id)})">
+                                <i class="fas fa-eye"></i> Ver
+                            </button>
+                            <button type="button" class="btn btn-primary" style="width:auto; padding: 10px 12px;" onclick="assignPendencyToMe(${Number(p.id)})">
+                                <i class="fas fa-hand-paper"></i> Assumir
+                            </button>
+                        </div>
+                    </div>
+                `;
+            };
+
             const content = `
                 <h1 id="sectionTitle">DEV - Tarefas</h1>
                 <p style="color: var(--gray-light); margin-bottom: 24px;">Gerencie todas as tarefas enviadas pela staff e acompanhe o fluxo completo.</p>
                 <div style="background: var(--black-dark); border-radius: 12px; padding: 16px; border: 1px solid var(--gray-border); margin-bottom: 20px;">
                     <strong style="color: var(--white-soft);">Painel DEV</strong>
                     <p style="color: var(--gray-text); font-size: 13px; margin-top: 6px;">Aqui voce acompanha o que a equipe envia, atualiza status e organiza as prioridades.</p>
+                </div>
+                <div style="background: var(--gray-dark); border-radius: 12px; padding: 16px; border: 1px solid var(--gray-border); margin-bottom: 18px;">
+                    <div style="display:flex; justify-content: space-between; align-items:center; gap: 12px; flex-wrap: wrap;">
+                        <div>
+                            <div style="color: var(--white-soft); font-weight: 900; font-size: 14px;">
+                                <i class="fas fa-clipboard-list" style="color: var(--primary);"></i> Pendências DEV (triagem)
+                            </div>
+                            <div style="color: var(--gray-text); font-size: 12px; margin-top: 6px;">
+                                Pendências com destino DEV aparecem aqui para triagem (ver detalhes e assumir).
+                            </div>
+                        </div>
+                        <div style="display:flex; gap: 10px; align-items:center; flex-wrap: wrap;">
+                            <span style="padding: 6px 10px; border-radius: 999px; background: rgba(0,168,255,.10); border: 1px solid rgba(0,168,255,.35); color: var(--primary); font-weight: 900; font-size: 12px;">
+                                ${devPendencies.length} abertas
+                            </span>
+                            <button type="button" class="btn btn-secondary" style="width:auto; padding: 10px 12px;" onclick="showSection('pendencias'); return false;">
+                                <i class="fas fa-arrow-left"></i> Ver pendências
+                            </button>
+                        </div>
+                    </div>
+                    <div style="margin-top: 14px; display:flex; flex-direction: column; gap: 10px;">
+                        ${devPendencies.length === 0 ? `
+                            <div style="color: var(--gray-text); font-size: 13px; padding: 10px 6px;">Nenhuma pendência DEV aberta no momento.</div>
+                        ` : devPendencies.slice(0, 8).map(renderDevPendencyRow).join('')}
+                        ${devPendencies.length > 8 ? `<div style="color: var(--gray-text); font-size: 12px; text-align:center; margin-top: 6px;">Mostrando 8 de ${devPendencies.length}. Veja detalhes na aba Pendências.</div>` : ``}
+                    </div>
                 </div>
                 <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px;">
                     <button class="btn-modal btn-secondary" style="padding: 8px 12px; font-size: 12px;" onclick="applyDevQuickFilter('mine')">
@@ -16577,6 +16930,37 @@ processDiscordCommand() diretamente.
             await populateAssigneeFilter();
             issueUiState.page = 1;
             setDevView(issueUiState.view);
+        }
+
+        function openDevIssueFromPendency(pendencyId) {
+            const pid = String(pendencyId || '').trim();
+            if (!pid) return;
+            const pendency = state?.pendencies?.byId?.get?.(pid) || null;
+            if (!pendency) {
+                alert('Pendência não encontrada no cache. Recarregue a página e tente novamente.');
+                return;
+            }
+            const type = (pendency.type || '').toString().toLowerCase().trim();
+            const category = (['bugs', 'mapas', 'carros', 'roupas', 'itens', 'coordenadas', 'logs', 'atualizacoes'].includes(type)) ? type : 'bugs';
+            const title = (pendency.title || '').toString().trim();
+            const desc = (pendency.description || '').toString().trim();
+            const requester = (pendency.userName || pendency.user_name || '').toString().trim();
+            const prefillTitle = title ? `Pendência #${pid} - ${title}` : `Pendência #${pid}`;
+            const prefillDesc = [
+                requester ? `Solicitante: ${requester}` : null,
+                `Pendência ID: ${pid}`,
+                '',
+                desc
+            ].filter(v => v !== null).join('\n');
+
+            issueUiState.filters.category = category;
+            issueUiState.prefill = {
+                category,
+                title: prefillTitle,
+                description: prefillDesc
+            };
+            issueUiState.lastListSection = 'dev_backlog';
+            showSection('dev_create');
         }
 
         async function loadDevCreate() {
@@ -16692,6 +17076,24 @@ processDiscordCommand() diretamente.
                 </form>
             `;
             document.querySelector('.content-card').innerHTML = content;
+            // Prefill opcional (ex: vindo de uma pendência DEV)
+            try {
+                const prefill = issueUiState.prefill;
+                if (prefill && typeof prefill === 'object') {
+                    if (prefill.category && document.getElementById('issueCategory')) {
+                        document.getElementById('issueCategory').value = String(prefill.category);
+                    }
+                    if (prefill.title && document.getElementById('issueTitle')) {
+                        document.getElementById('issueTitle').value = String(prefill.title);
+                    }
+                    if (prefill.description && document.getElementById('issueDescription')) {
+                        document.getElementById('issueDescription').value = String(prefill.description);
+                    }
+                    issueUiState.prefill = null;
+                }
+            } catch (e) {
+                console.warn('[issues] falha ao aplicar prefill:', e);
+            }
             if (!allowAssign) {
                 const severitySelect = document.getElementById('issueSeverity');
                 const statusSelect = document.getElementById('issueStatus');
@@ -17420,11 +17822,13 @@ processDiscordCommand() diretamente.
             return (role || '').toString().toLowerCase().replace(/\s+/g, '').trim();
         }
 
-        function pollRoleIsAllowed(poll, role) {
+        function pollRoleIsAllowed(poll, roleOrRoles) {
             const allowed = poll?.allowedRoles ?? poll?.allowed_roles;
             if (!Array.isArray(allowed) || allowed.length === 0) return true;
             const normalizedAllowed = new Set(allowed.map(normalizeRoleKey));
-            return normalizedAllowed.has(normalizeRoleKey(role));
+            const roles = normalizeRoleList(roleOrRoles);
+            if (roles.length === 0) return false;
+            return roles.some(r => normalizedAllowed.has(normalizeRoleKey(r)));
         }
 
         function pollIsOpenNow(poll) {
@@ -17438,7 +17842,7 @@ processDiscordCommand() diretamente.
         }
 
         function canManagePolls() {
-            return isCLevelRole(currentUser?.role) || isDevRole(currentUser?.role);
+            return isCLevelRole(currentUser?.roles || currentUser?.role) || isDevRole(currentUser?.roles || currentUser?.role);
         }
 
         function formatDateTimeBR(value) {
@@ -17477,29 +17881,30 @@ processDiscordCommand() diretamente.
             const contentCard = document.querySelector('.content-card');
             if (!contentCard) return;
 
-            const [pollsRaw, optionsRaw, votesRaw] = await Promise.all([
-                getData('txd_polls', false),
-                getData('txd_poll_options', false),
-                getData('txd_poll_votes', false)
-            ]);
+            try {
+                const [pollsRaw, optionsRaw, votesRaw] = await Promise.all([
+                    getData('txd_polls', false),
+                    getData('txd_poll_options', false),
+                    getData('txd_poll_votes', false)
+                ]);
 
-            const polls = Array.isArray(pollsRaw) ? pollsRaw : [];
-            const pollOptions = Array.isArray(optionsRaw) ? optionsRaw : [];
-            const pollVotes = Array.isArray(votesRaw) ? votesRaw : [];
+                const polls = Array.isArray(pollsRaw) ? pollsRaw : [];
+                const pollOptions = Array.isArray(optionsRaw) ? optionsRaw : [];
+                const pollVotes = Array.isArray(votesRaw) ? votesRaw : [];
 
-            const openPolls = polls.filter(p => pollIsOpenNow(p));
-            const closedPolls = polls.filter(p => !pollIsOpenNow(p));
+                const openPolls = polls.filter(p => pollIsOpenNow(p));
+                const closedPolls = polls.filter(p => !pollIsOpenNow(p));
 
-            const visiblePolls = pollsUiFilterMode === 'all'
-                ? polls
-                : (pollsUiFilterMode === 'closed' ? closedPolls : openPolls);
+                const visiblePolls = pollsUiFilterMode === 'all'
+                    ? polls
+                    : (pollsUiFilterMode === 'closed' ? closedPolls : openPolls);
 
-            const canCreate = canManagePolls();
+                const canCreate = canManagePolls();
 
-            contentCard.innerHTML = `
+                contentCard.innerHTML = `
                 <div class=\"commands-header\">
                     <div>
-                        <h1 style=\"margin-bottom: 6px;\">🗳️ Votações</h1>
+                        <h1 id=\"sectionTitle\" style=\"margin-bottom: 6px;\">🗳️ Votações</h1>
                         <p style=\"color: var(--gray-light); margin: 0;\">Crie votações internas e registre os votos por cargo.</p>
                     </div>
                     <div style=\"display: flex; gap: 10px; align-items: center; flex-wrap: wrap;\">
@@ -17509,7 +17914,7 @@ processDiscordCommand() diretamente.
                             <div class=\"filter-chip ${pollsUiFilterMode === 'all' ? 'active' : ''}\" onclick=\"setPollsFilter('all')\"><i class=\"fas fa-layer-group\"></i> Todas (${polls.length})</div>
                         </div>
                         ${canCreate ? `
-                        <button class=\"btn btn-primary\" style=\"width:auto; padding: 12px 14px;\" onclick=\"openPollModal()\">
+                        <button type=\"button\" class=\"btn btn-primary\" style=\"width:auto; padding: 12px 14px;\" onclick=\"openPollModal(); return false;\">
                             <i class=\"fas fa-plus\"></i> Nova votação
                         </button>` : ``}
                     </div>
@@ -17524,6 +17929,21 @@ processDiscordCommand() diretamente.
                     ` : visiblePolls.map(poll => renderPollCard(poll, pollOptions, pollVotes)).join('')}
                 </div>
             `;
+            } catch (e) {
+                console.error('[polls] Erro ao carregar votações:', e);
+                contentCard.innerHTML = `
+                    <h1 id=\"sectionTitle\">🗳️ Votações</h1>
+                    <div style=\"background: var(--gray-dark); border: 1px solid var(--gray-border); border-radius: 12px; padding: 20px; margin-top: 16px;\">
+                        <div style=\"color: var(--danger); font-weight: 800;\">Erro ao carregar votações</div>
+                        <div style=\"color: var(--gray-light); margin-top: 8px;\">Abra o console (F12) para ver detalhes.</div>
+                        <div style=\"margin-top: 14px;\">
+                            <button type=\"button\" class=\"btn btn-secondary\" style=\"width:auto;\" onclick=\"loadVotacoes(); return false;\">
+                                <i class=\"fas fa-rotate\"></i> Tentar novamente
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }
         }
 
         function renderPollCard(poll, pollOptions, pollVotes) {
@@ -17542,7 +17962,7 @@ processDiscordCommand() diretamente.
             const myVote = votes.find(v => String(v.voterId ?? v.voter_id) === voterId);
             const hasVoted = !!myVote;
 
-            const canVote = isOpen && pollRoleIsAllowed(poll, currentUser?.role);
+            const canVote = isOpen && pollRoleIsAllowed(poll, currentUser?.roles || currentUser?.role);
             const showResults = !isOpen || hasVoted;
             const { optionCounts, total } = computePollResults(pollId, options, votes);
 
@@ -17570,9 +17990,9 @@ processDiscordCommand() diretamente.
 
                         ${canManagePolls() ? `
                         <div style=\"display:flex; gap: 8px; align-items:center; flex-wrap: wrap;\">
-                            <button class=\"btn btn-secondary\" style=\"width:auto; padding: 10px 12px;\" onclick=\"openPollModal(${pollId})\"><i class=\"fas fa-pen\"></i> Editar</button>
-                            ${isOpen ? `<button class=\"btn btn-danger\" style=\"width:auto; padding: 10px 12px;\" onclick=\"closePoll(${pollId})\"><i class=\"fas fa-lock\"></i> Encerrar</button>` : ``}
-                            <button class=\"btn btn-secondary\" style=\"width:auto; padding: 10px 12px; border-color: rgba(255,51,102,.35); color: var(--danger);\" onclick=\"deletePoll(${pollId})\"><i class=\"fas fa-trash\"></i></button>
+                            <button type=\"button\" class=\"btn btn-secondary\" style=\"width:auto; padding: 10px 12px;\" onclick=\"openPollModal(${pollId}); return false;\"><i class=\"fas fa-pen\"></i> Editar</button>
+                            ${isOpen ? `<button type=\"button\" class=\"btn btn-danger\" style=\"width:auto; padding: 10px 12px;\" onclick=\"closePoll(${pollId}); return false;\"><i class=\"fas fa-lock\"></i> Encerrar</button>` : ``}
+                            <button type=\"button\" class=\"btn btn-secondary\" style=\"width:auto; padding: 10px 12px; border-color: rgba(255,51,102,.35); color: var(--danger);\" onclick=\"deletePoll(${pollId}); return false;\"><i class=\"fas fa-trash\"></i></button>
                         </div>` : ``}
                     </div>
 
@@ -17584,7 +18004,7 @@ processDiscordCommand() diretamente.
 
                     ${(!canVote && isOpen && !hasVoted) ? `
                         <div style=\"margin-top: 14px; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,170,0,.35); background: rgba(255,170,0,.08); color: var(--warning); font-weight: 600;\">
-                            <i class=\"fas fa-ban\"></i> Seu cargo (${escapeHtml(currentUser?.role || 'N/A')}) não está autorizado a votar nesta votação.
+                            <i class=\"fas fa-ban\"></i> Seu cargo (${escapeHtml(normalizeRoleList(currentUser?.roles || currentUser?.role).join(' + ') || currentUser?.role || 'N/A')}) não está autorizado a votar nesta votação.
                         </div>
                     ` : ``}
 
@@ -17612,7 +18032,7 @@ processDiscordCommand() diretamente.
                 return `
                     <div style=\"display:flex; gap: 10px; align-items:center; padding: 12px; border-radius: 12px; background: var(--gray-medium); border: 1px solid var(--gray-border);\">
                         <div style=\"flex: 1; color: var(--white-soft);\">${escapeHtml(optText || 'Opção')}</div>
-                        <button class=\"btn btn-primary\" style=\"width:auto; padding: 10px 12px;\" onclick=\"voteOnPoll(${pollId}, ${optId})\">
+                        <button type=\"button\" class=\"btn btn-primary\" style=\"width:auto; padding: 10px 12px;\" onclick=\"event && event.preventDefault && event.preventDefault(); event && event.stopPropagation && event.stopPropagation(); voteOnPoll(${pollId}, ${optId}); return false;\">
                             <i class=\"fas fa-check\"></i> Votar
                         </button>
                     </div>
@@ -17966,7 +18386,7 @@ processDiscordCommand() diretamente.
                         alert('Esta votação já foi encerrada.');
                         return;
                     }
-                    if (!pollRoleIsAllowed(poll, currentUser?.role)) {
+                    if (!pollRoleIsAllowed(poll, currentUser?.roles || currentUser?.role)) {
                         alert('Seu cargo não está autorizado a votar nesta votação.');
                         return;
                     }
@@ -17984,7 +18404,7 @@ processDiscordCommand() diretamente.
                             option_id: optionId,
                             voter_id: voterId,
                             voter_name: currentUser?.name || currentUser?.displayName || 'Usuário',
-                            voter_role: currentUser?.role || null
+                            voter_role: (normalizeRoleList(currentUser?.roles || currentUser?.role).join(' + ') || currentUser?.role || null)
                         }]);
                     if (error) throw error;
 
@@ -18012,7 +18432,7 @@ processDiscordCommand() diretamente.
             'comandos': ['txd_commands', 'txd_favorite_commands', 'txd_command_usage'],
             'agenda': ['txd_events'],
             'formularios': ['txd_pendencies', 'txd_staff'],
-            'dev_backlog': ['txd_staff'],
+            'dev_backlog': ['txd_staff', 'txd_pendencies'],
             'dev_create': ['txd_staff'],
             'dev_detail': ['txd_staff'],
             'pendencias': ['txd_pendencies', 'txd_staff'],
