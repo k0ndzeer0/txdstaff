@@ -21,6 +21,7 @@
             --black-deep: #0B0B0C;
             --black-dark: #1A1B1D;
             --gray-dark: #2A2C2F;
+            --gray-darker: #202225;
             --gray-medium: #3A3D41;
             --gray-border: #55585C;
             --gray-text: #6F7276;
@@ -29,6 +30,7 @@
             --white-soft: #F2F2F2;
             
             /* Cores de destaque - usando tons da paleta */
+            --primary: #00A8FF;
             --accent-primary: var(--gray-very-light);
             --accent-hover: var(--white-soft);
             --success: #00ff88;
@@ -131,7 +133,7 @@
             text-align: center;
             box-shadow: 
                 0 8px 32px rgba(0, 0, 0, 0.4),
-                0 0 0 1px rgba(122, 44, 255, 0.1),
+                0 0 0 1px rgba(0, 168, 255, 0.12),
                 inset 0 1px 0 rgba(255, 255, 255, 0.05);
             animation: fadeInUp 0.6s ease-out;
         }
@@ -419,7 +421,7 @@
             list-style: none;
             flex-wrap: nowrap;
             overflow-x: auto;
-            overflow-y: hidden;
+            overflow-y: visible;
             white-space: nowrap;
             flex: 1;
             min-width: 0;
@@ -496,13 +498,30 @@
             width: auto;
         }
 
-        .dev-menu-trigger {
+        .navbar-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-shrink: 0;
+        }
+
+        .navbar-context {
+            color: var(--gray-light);
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            white-space: nowrap;
+        }
+
+        .dev-menu-trigger,
+        .stats-menu-trigger {
             display: flex;
             align-items: center;
             gap: 6px;
         }
 
-        .dev-submenu {
+        .dev-submenu,
+        .stats-submenu {
             position: absolute;
             top: calc(100% + 8px);
             left: 0;
@@ -518,7 +537,16 @@
             z-index: 120;
         }
 
-        .dev-submenu a {
+        /* Stats submenu precisa escapar do container com overflow-x (senão fica "invisível") */
+        .stats-submenu {
+            position: fixed;
+            top: 0;
+            left: 0;
+            z-index: 5000;
+        }
+
+        .dev-submenu a,
+        .stats-submenu a {
             padding: 8px 12px;
             border-radius: 8px;
             color: var(--gray-light);
@@ -527,13 +555,18 @@
             transition: all 0.2s ease;
         }
 
-        .dev-submenu a:hover {
+        .dev-submenu a:hover,
+        .stats-submenu a:hover {
             color: var(--white-soft);
             background: var(--gray-dark);
         }
 
         .dev-menu-item:hover .dev-submenu,
         .dev-menu-item.open .dev-submenu {
+            display: flex;
+        }
+
+        .stats-menu-item.open .stats-submenu {
             display: flex;
         }
 
@@ -1964,8 +1997,13 @@
                 <li><a href="#" onclick="showSection('perfil'); return false;">👤 Perfil</a></li>
                 <li><a href="#" onclick="showSection('config'); return false;">Configurações</a></li>
                 <li><a href="#" onclick="showSection('tarefas'); return false;">Tarefas</a></li>
-                <li><a href="#" onclick="showSection('ranking'); return false;">📊 Ranking</a></li>
-                <li><a href="#" onclick="showSection('conquistas'); return false;">🏆 Conquistas</a></li>
+                <li class="stats-menu-item" id="statsMenuItem">
+                    <a href="#" class="stats-menu-trigger" id="statsMenuTrigger" onclick="toggleStatsMenu(); return false;">📊 Estatísticas <i class="fas fa-chevron-down" style="font-size: 11px;"></i></a>
+                    <div class="stats-submenu">
+                        <a href="#" onclick="showSection('ranking'); return false;">📊 Ranking</a>
+                        <a href="#" onclick="showSection('conquistas'); return false;">🏆 Conquistas</a>
+                    </div>
+                </li>
                 <li><a href="#" onclick="showSection('comandos'); return false;">Comandos</a></li>
                 <li><a href="#" onclick="showSection('votacoes'); return false;">🗳️ Votações</a></li>
                 <li><a href="#" onclick="showSection('controle'); return false;">Controle</a></li>
@@ -1973,9 +2011,9 @@
                 <li><a href="#" onclick="showSection('advertencias'); return false;">Advertências</a></li>
                 <li><a href="#" onclick="showSection('agenda'); return false;">Agenda</a></li>
                 <li><a href="#" onclick="showSection('relatorios'); return false;">Relatórios</a></li>
-                <li><a href="regras.html" target="_blank" rel="noopener">📚 Regras</a></li>
             </ul>
-            <div style="display: flex; gap: 10px; align-items: center; flex-shrink: 0;">
+            <div class="navbar-actions">
+                <span id="navbarContextLabel" class="navbar-context hidden"></span>
                 <button class="btn btn-secondary" id="notificationsNavBtn" onclick="openNotificationsModal()" title="Notificações" style="position: relative;">
                     <i class="fas fa-bell"></i>
                     <span class="notification-badge hidden" id="notificationsNavBadge">0</span>
@@ -2710,6 +2748,32 @@
         let cacheInitialized = false;
         let realtimeInitialized = false;
         let backupHistoryMemory = [];
+
+        // Debug/logs (deixe false para melhorar performance)
+        const DEBUG = false;
+        function debugLog(...args) { if (DEBUG) console.log(...args); }
+        function debugWarn(...args) { if (DEBUG) console.warn(...args); }
+
+        // Sequência de navegação para evitar renderizações atrasadas
+        let activeNavSeq = 0;
+        function bumpNavSeq() { activeNavSeq += 1; return activeNavSeq; }
+        function nextFrame() {
+            return new Promise(resolve => {
+                try { requestAnimationFrame(() => resolve()); } catch (e) { setTimeout(resolve, 0); }
+            });
+        }
+        function renderSectionLoading(title = 'Carregando...') {
+            const card = document.querySelector('.content-card');
+            if (!card) return;
+            card.innerHTML = `
+                <h1 id="sectionTitle">${escapeHtml(title)}</h1>
+                <div style="margin-top: 14px; color: var(--gray-text); font-size: 14px;">
+                    <i class="fas fa-spinner fa-spin" style="margin-right: 8px;"></i>
+                    Carregando dados…
+                </div>
+            `;
+        }
+        const backgroundRefreshInFlight = new Set();
         
         // Função helper para limpar cache e timestamp
         function clearCacheKey(key) {
@@ -2719,13 +2783,17 @@
         
         // Função para atualizar dados em background (stale-while-revalidate)
         async function refreshDataInBackground(key) {
+            const k = String(key || '').trim();
+            if (!k) return;
+            if (backgroundRefreshInFlight.has(k)) return;
+            backgroundRefreshInFlight.add(k);
             try {
                 const tableName = keyToTableMap[key];
                 if (!tableName || !supabaseClient) return;
-                
+
                 // Buscar dados atualizados do Supabase em background
                 let data = [];
-                
+
                 // Usar a mesma lógica do getData, mas sem retornar (só atualiza cache)
                 switch(key) {
                     case 'txd_staff':
@@ -2734,6 +2802,10 @@
                             .select('*')
                             .order('created_at', { ascending: false });
                         if (!staffError) data = toCamelCase(staffData || []);
+                        break;
+                    case 'txd_kanban':
+                        // Evitar query na tabela "kanban" (não existe); reutilizar getData com forceRefresh
+                        data = await getData('txd_kanban', true);
                         break;
                     default:
                         // Para outros casos, usar query genérica
@@ -2752,6 +2824,8 @@
             } catch (error) {
                 // Ignorar erros em background
                 console.warn(`Erro ao atualizar ${key} em background:`, error);
+            } finally {
+                backgroundRefreshInFlight.delete(k);
             }
         }
         
@@ -3071,6 +3145,10 @@
 
         // Renderizações derivadas do state (sem duplicar)
         function renderPendencias() {
+            if (currentSection === 'dev_backlog') {
+                loadDevBacklog().catch(err => console.error('[dev_backlog] Erro ao renderizar pendências:', err));
+                return;
+            }
             if (currentSection !== 'pendencias' && currentSection !== 'formularios') return;
             loadPendencies().catch(err => console.error('[pendencies] Erro ao renderizar:', err));
         }
@@ -3478,7 +3556,8 @@
             'txd_discord_config': 'discord_config',
             'txd_discord_commands_log': 'discord_commands_log',
             'txd_events': 'events',            'txd_announcements': 'announcements',
-            'txd_kanban': 'kanban',
+            // "kanban" não é uma tabela; usamos kanban_* (cards/columns/assignees)
+            'txd_kanban': 'kanban_cards',
             'txd_system_logs': 'system_logs',
             'txd_system_settings': 'system_settings',
             'txd_security_settings': 'security_settings',
@@ -3821,16 +3900,16 @@
                                 .select('*')
                                 .order('requested_at', { ascending: false });
                             if (!requestsError && requestsData) {
-                                console.log('📊 Dados brutos do Supabase:', requestsData);
-                                console.log('📊 Primeira solicitação (exemplo):', requestsData[0]);
-                                console.log('📊 Campos disponíveis:', requestsData[0] ? Object.keys(requestsData[0]) : 'Nenhum dado');
+                                debugLog('📊 Dados brutos do Supabase:', requestsData);
+                                debugLog('📊 Primeira solicitação (exemplo):', requestsData[0]);
+                                debugLog('📊 Campos disponíveis:', requestsData[0] ? Object.keys(requestsData[0]) : 'Nenhum dado');
                                 
                                 // Converter para camelCase e garantir campos necessários
                                 // Mapear todos os campos possíveis
                                 data = (requestsData || []).map(req => {
                                     // Log para debug
                                     if (requestsData.indexOf(req) === 0) {
-                                        console.log('🔍 Mapeando primeira solicitação:', req);
+                                        debugLog('🔍 Mapeando primeira solicitação:', req);
                                     }
                                     
                                     return {
@@ -3851,9 +3930,9 @@
                                         _raw: req
                                     };
                                 });
-                                console.log('✅ Solicitações mapeadas:', data.length);
-                                console.log('📋 Primeira solicitação mapeada:', data[0]);
-                                console.log('📋 Todas as solicitações:', data);
+                                debugLog('✅ Solicitações mapeadas:', data.length);
+                                debugLog('📋 Primeira solicitação mapeada:', data[0]);
+                                debugLog('📋 Todas as solicitações:', data);
                                 
                                 // IMPORTANTE: Garantir que data não seja undefined
                                 if (!data || data.length === 0) {
@@ -3928,7 +4007,12 @@
                 // Atualizar cache com timestamp
                 dataCache[key] = data;
                 cacheTimestamps[key] = Date.now();
-                console.log(`💾 Cache atualizado para '${key}':`, data.length, 'itens');
+                const itemsCount = Array.isArray(data)
+                    ? data.length
+                    : (data && typeof data === 'object'
+                        ? (Array.isArray(data.cards) ? data.cards.length : 1)
+                        : 0);
+                debugLog(`💾 Cache atualizado para '${key}':`, itemsCount, 'itens');
                 return data;
                 
             } catch (error) {
@@ -4202,7 +4286,15 @@
                         
                     case 'txd_user_achievements':
                         if (Array.isArray(data)) {
-                            const convertedData = toSnakeCase(data);
+                            // Compatibilidade: alguns schemas exigem user_name NOT NULL
+                            const enriched = data.map(row => {
+                                if (!row || typeof row !== 'object') return row;
+                                const hasUserName = row.userName || row.user_name;
+                                if (hasUserName) return row;
+                                const fallbackName = (currentUser?.displayName || currentUser?.name || '').toString().trim();
+                                return fallbackName ? { ...row, userName: fallbackName } : row;
+                            });
+                            const convertedData = toSnakeCase(enriched);
                             const { error } = await supabaseClient
                                 .from('user_achievements')
                                 .upsert(convertedData, { onConflict: 'user_id,achievement_id' });
@@ -4599,6 +4691,107 @@
             }
         };
 
+        // Persistência simples de sessão (evita deslogar no F5)
+        const SESSION_STORAGE_KEY = 'txd_staff_session_v1';
+        const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 dias
+
+        function persistSession(user) {
+            try {
+                if (!user) return;
+                const safeUser = {
+                    id: user.id,
+                    name: user.name,
+                    displayName: user.displayName,
+                    login: user.login,
+                    role: user.role,
+                    roles: Array.isArray(user.roles) ? user.roles : normalizeRoleList(user.roles || user.role),
+                    email: user.email || null,
+                    status: user.status || null,
+                    area: user.area || null,
+                    gameId: user.gameId || null,
+                    discordId: user.discordId || null
+                };
+                const payload = {
+                    user: safeUser,
+                    lastSection: String(currentSection || 'inicio'),
+                    createdAt: Date.now(),
+                    expiresAt: Date.now() + SESSION_TTL_MS
+                };
+                localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(payload));
+            } catch (e) {}
+        }
+
+        function clearPersistedSession() {
+            try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
+        }
+
+        function readPersistedSession() {
+            try {
+                const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+                if (!raw) return null;
+                const parsed = JSON.parse(raw);
+                const expiresAt = Number(parsed?.expiresAt || 0);
+                if (!expiresAt || Date.now() > expiresAt) {
+                    clearPersistedSession();
+                    return null;
+                }
+                const user = parsed?.user || null;
+                if (!user || user.id === undefined || user.id === null) return null;
+                return {
+                    user,
+                    lastSection: parsed?.lastSection || 'inicio'
+                };
+            } catch (e) {
+                return null;
+            }
+        }
+
+        async function restoreSessionIfAvailable() {
+            const session = readPersistedSession();
+            if (!session) return false;
+
+            try {
+                const u = session.user;
+                const effectiveRoles = normalizeRoleList(u.roles || u.role);
+                const primaryRole = u.role || effectiveRoles[0] || 'Owner';
+                currentUser = {
+                    id: u.id,
+                    name: u.name || u.displayName || 'Staff',
+                    displayName: u.displayName || u.name || 'Staff',
+                    login: u.login || u.name || 'staff',
+                    role: primaryRole,
+                    roles: effectiveRoles.length > 0 ? effectiveRoles : [primaryRole],
+                    email: u.email || null,
+                    status: u.status || 'Ativo',
+                    area: u.area || null,
+                    gameId: u.gameId || null,
+                    discordId: u.discordId || null
+                };
+
+                const permissions = getUserPermissionsForRoles(currentUser.roles || currentUser.role);
+                applyPermissionsToMenu(permissions);
+                renderDevMenuItem();
+
+                const loginScreen = document.getElementById('loginScreen');
+                const dashboard = document.getElementById('dashboard');
+                if (loginScreen) loginScreen.style.display = 'none';
+                if (dashboard) dashboard.classList.add('active');
+
+                if (supabaseClient && !realtimeInitialized) {
+                    initializeRealtime();
+                }
+
+                // Atualiza caches em background e volta para a última aba (ou início)
+                refreshData().catch(() => {});
+                showSection(session.lastSection || 'inicio');
+
+                return true;
+            } catch (e) {
+                clearPersistedSession();
+                return false;
+            }
+        }
+
         async function handleLogin(event) {
             event.preventDefault();
             const username = document.getElementById('loginUsername').value.trim();
@@ -4789,6 +4982,9 @@
                         gameId: userFound.gameId || null,
                         discordId: userFound.discordId || null
                     };
+
+                    // Persistir sessão (não desloga no F5)
+                    persistSession(currentUser);
                     
                     // Aplicar permissões ao menu
                     const permissions = getUserPermissionsForRoles(currentUser.roles || currentUser.role);
@@ -5080,6 +5276,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
 
         function logout() {
             if (confirm('Deseja realmente sair do sistema?')) {
+                clearPersistedSession();
                 // Notificar Discord sobre logout
                 sendDiscordNotification('staff', '🚪 Logout Realizado', 
                     `${currentUser.name} saiu do sistema`,
@@ -5142,6 +5339,9 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 document.querySelectorAll('.nav-menu a').forEach(link => {
                     link.classList.remove('active');
                 });
+
+                // Limpar contexto do navbar
+                updateNavbarContext('');
                 
                 return; // Bloquear acesso
             }
@@ -5176,6 +5376,33 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                     link.classList.add('active');
                 }
             });
+
+            // Menu pai: Estatísticas (Ranking + Conquistas)
+            const statsTrigger = document.getElementById('statsMenuTrigger');
+            if (statsTrigger) {
+                statsTrigger.classList.toggle('active', section === 'ranking' || section === 'conquistas');
+            }
+
+            // Fechar submenus ao navegar
+            const statsItem = document.getElementById('statsMenuItem');
+            if (statsItem) statsItem.classList.remove('open');
+            const devItem = document.getElementById('devMenuItem');
+            if (devItem) devItem.classList.remove('open');
+
+            // Contexto no navbar (ex: "Relatório:")
+            updateNavbarContext(section);
+        }
+
+        function updateNavbarContext(section) {
+            const el = document.getElementById('navbarContextLabel');
+            if (!el) return;
+            if (section === 'relatorios') {
+                el.textContent = 'Relatório:';
+                el.classList.remove('hidden');
+            } else {
+                el.textContent = '';
+                el.classList.add('hidden');
+            }
         }
 
         // ========== FUNCIONALIDADES ==========
@@ -5430,7 +5657,6 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 </a>
                 <div class="dev-submenu">
                     <a href="#" onclick="showSection('dev_backlog'); return false;">Backlog</a>
-                    <a href="#" onclick="openIssueCreate('dev_create'); return false;">Nova Tarefa</a>
                     <div style="height: 1px; background: var(--gray-border); margin: 6px 0;"></div>
                     <a href="#" onclick="setIssueCategoryFilter('mapas'); return false;">MAPAS</a>
                     <a href="#" onclick="setIssueCategoryFilter('bugs'); return false;">BUGS</a>
@@ -5468,6 +5694,49 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             if (!devItem) return;
             if (!devItem.contains(event.target)) {
                 devItem.classList.remove('open');
+            }
+        });
+
+        function toggleStatsMenu(forceOpen) {
+            const li = document.getElementById('statsMenuItem');
+            if (!li) return;
+            const devItem = document.getElementById('devMenuItem');
+            if (devItem) devItem.classList.remove('open');
+            if (typeof forceOpen === 'boolean') {
+                li.classList.toggle('open', forceOpen);
+                if (forceOpen) positionStatsSubmenu();
+                return;
+            }
+            li.classList.toggle('open');
+            if (li.classList.contains('open')) positionStatsSubmenu();
+        }
+
+        function positionStatsSubmenu() {
+            const trigger = document.getElementById('statsMenuTrigger');
+            const submenu = document.querySelector('#statsMenuItem .stats-submenu');
+            if (!trigger || !submenu) return;
+            const rect = trigger.getBoundingClientRect();
+            const left = Math.min(rect.left, window.innerWidth - 220);
+            const top = Math.min(rect.bottom + 8, window.innerHeight - 40);
+            submenu.style.left = `${Math.max(8, left)}px`;
+            submenu.style.top = `${Math.max(8, top)}px`;
+        }
+
+        window.addEventListener('resize', () => {
+            const li = document.getElementById('statsMenuItem');
+            if (li?.classList?.contains('open')) positionStatsSubmenu();
+        });
+
+        window.addEventListener('scroll', () => {
+            const li = document.getElementById('statsMenuItem');
+            if (li?.classList?.contains('open')) positionStatsSubmenu();
+        }, true);
+
+        document.addEventListener('click', (event) => {
+            const statsItem = document.getElementById('statsMenuItem');
+            if (!statsItem) return;
+            if (!statsItem.contains(event.target)) {
+                statsItem.classList.remove('open');
             }
         });
 
@@ -5800,6 +6069,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 </div>
             `;
             document.querySelector('.content-card').innerHTML = content;
+            try { filterPendencies(); } catch (e) {}
         }
 
         // ========== KANBAN: FILTROS POR RESPONSÁVEL ==========
@@ -5845,8 +6115,19 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         }
 
         async function loadKanban() {
+            const navSeq = activeNavSeq;
+            try { renderSectionLoading('📌 Tarefas'); } catch (e) {}
+            await nextFrame();
+
+            // Aquecer dados em paralelo (melhora troca de abas)
+            const [staffRows] = await Promise.all([
+                getData('txd_staff', false),
+                ensureKanbanLoaded(false)
+            ]).then(r => [r[0]]);
+            if (navSeq !== activeNavSeq) return;
+            if (Array.isArray(staffRows)) staffData = staffRows;
+
             // Renderizar a partir do state único (evita duplicação e permite realtime sem reload)
-            await ensureKanbanLoaded(false);
             let kanbanData = getKanbanSnapshotFromState();
             
             // Validações robustas para garantir que os dados estão corretos
@@ -5880,11 +6161,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                     { id: 'review', name: 'Em Revisão', color: '#3b82f6' },
                     { id: 'done', name: 'Concluído', color: '#00ff88' }
                 ];
-                // Salvar colunas padrão apenas uma vez (sem recarregar)
-                await saveData('txd_kanban', kanbanData);
-                // Re-sincronizar state após criar colunas padrão
-                await ensureKanbanLoaded(true);
-                kanbanData = getKanbanSnapshotFromState();
+                // Salvar colunas padrão em background (não bloqueia navegação)
+                saveData('txd_kanban', kanbanData).catch(() => {});
             }
             
             // NÃO chamar saveKanbanData() aqui para evitar loop infinito com real-time
@@ -6199,6 +6477,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 </div>
             `;
             document.querySelector('.content-card').innerHTML = content;
+            try { filterPendencies(); } catch (e) {}
         }
         
         // ========== GERENCIAMENTO DE SOLICITAÇÕES DE CADASTRO ==========
@@ -7441,8 +7720,12 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         }
 
         async function loadAgenda() {
-            await loadSectionData('agenda');
-            if (!Array.isArray(eventsData)) eventsData = [];
+            const navSeq = activeNavSeq;
+            try { renderSectionLoading('📅 Agenda da Equipe'); } catch (e) {}
+            await nextFrame();
+            const events = await getData('txd_events', false);
+            if (navSeq !== activeNavSeq) return;
+            eventsData = Array.isArray(events) ? events : [];
             
             const canCreate = hasPermission('event.create');
             const canEdit = hasPermission('event.edit');
@@ -7658,15 +7941,31 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         }
 
         async function loadReports() {
-            // Carregar dados necessários
-            await loadSectionData('relatorios');
-            
-            // Calcular estatísticas gerais
-            await ensureKanbanLoaded(false);
+            const navSeq = activeNavSeq;
+            try { renderSectionLoading('📊 Relatórios e Estatísticas'); } catch (e) {}
+            await nextFrame();
+
+            // Carregar dados em paralelo (reduz lag ao trocar abas)
+            const [staff, eventsFetched, messagesFetched] = await Promise.all([
+                getData('txd_staff', false),
+                getData('txd_events', false),
+                getData('txd_chat_messages', false),
+                ensureKanbanLoaded(false),
+                ensurePendenciesLoaded(false)
+            ]).then(results => {
+                // results: [staff, events, messages, undefined, undefined]
+                return [results[0], results[1], results[2]];
+            });
+
+            if (navSeq !== activeNavSeq) return;
+            if (Array.isArray(staff)) staffData = staff;
+            if (Array.isArray(eventsFetched)) eventsData = eventsFetched;
+            if (Array.isArray(messagesFetched)) chatMessages = messagesFetched;
+
+            // Calcular estatísticas gerais (state já carregado)
             const kanbanData = getKanbanSnapshotFromState();
             const totalTasks = (kanbanData?.cards || []).length;
             const completedTasks = (kanbanData?.cards || []).filter(c => c && (c.columnId === 'done' || c.column_id === 'done')).length;
-            await ensurePendenciesLoaded(false);
             const pendencias = Array.from(state.pendencies.byId.values());
             const resolvedPendencias = pendencias.filter(p => ['completed', 'concluida', 'concluída'].includes((p.status || '').toLowerCase())).length;
             const events = Array.isArray(eventsData) ? eventsData : [];
@@ -7928,11 +8227,18 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         }
 
         async function loadWarnings() {
-            // Carregar dados necessários
-            await loadSectionData('advertencias');
+            const navSeq = activeNavSeq;
+            try { renderSectionLoading('⚠️ Advertências'); } catch (e) {}
+            await nextFrame();
+
+            // Buscar dados em paralelo (melhora navegação)
+            const [staff, warningsRaw] = await Promise.all([
+                getData('txd_staff', false),
+                getData('txd_warnings', false)
+            ]);
+            if (navSeq !== activeNavSeq) return;
+            if (Array.isArray(staff)) staffData = staff;
             
-            // Buscar advertências
-            const warningsRaw = await getData('txd_warnings', false);
             const warnings = Array.isArray(warningsRaw) ? warningsRaw : [];
             
             // Estatísticas
@@ -8448,10 +8754,18 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         }
 
         // ========== SISTEMA DE PENDÊNCIAS ==========
+
+        // Filtro (em memória) para exibir apenas pendências assumidas pelo usuário atual
+        let pendencyAssigneeFilterMode = null;
         
         async function loadPendencies() {
-            await loadSectionData('pendencias');
+            const navSeq = activeNavSeq;
+            try { renderSectionLoading('📋 Pendências'); } catch (e) {}
+            await nextFrame();
+            // aquecer dados em background (não bloqueia)
+            loadSectionData('pendencias').catch(() => {});
             await ensurePendenciesLoaded(false);
+            if (navSeq !== activeNavSeq) return;
             const pendencies = Array.from(state.pendencies.byId.values());
             const isCLevel = isCLevelRole(currentUser?.roles || currentUser?.role);
             const isDev = isDevRole(currentUser?.roles || currentUser?.role);
@@ -8467,6 +8781,12 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             };
 
             const myPendencies = pendencies.filter(isMinePendency);
+
+            const isAssignedToMe = (p) => {
+                const assignedUserId = p?.assignedUserId ?? p?.assigned_user_id ?? null;
+                const assignedUserName = p?.assignedUserName ?? p?.assigned_user_name ?? null;
+                return isCurrentUserId(assignedUserId) || isCurrentUserName(assignedUserName);
+            };
 
             const visiblePendencies = pendencies.filter(p => {
                 if (isMinePendency(p)) return true;
@@ -8502,11 +8822,27 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 return true;
             };
 
+            if (pendencyAssigneeFilterMode === null) {
+                pendencyAssigneeFilterMode = 'all';
+            }
+            const assigneeFilterEnabled = canApproveBase;
+            const assigneeFilterMode = pendencyAssigneeFilterMode || 'all';
+
             const pendingPendencies = visiblePendencies.filter(p => normalizePendencyStatusValue(p?.status, p) === 'pending');
             const approvedPendencies = visiblePendencies.filter(p => normalizePendencyStatusValue(p?.status, p) === 'approved');
             const rejectedPendencies = visiblePendencies.filter(p => normalizePendencyStatusValue(p?.status, p) === 'rejected');
             const inProgressPendencies = visiblePendencies.filter(p => normalizePendencyStatusValue(p?.status, p) === 'in_progress');
             const completedPendencies = visiblePendencies.filter(p => normalizePendencyStatusValue(p?.status, p) === 'completed');
+            const sortedCompletedPendencies = [...completedPendencies].sort((a, b) => {
+                // Priorizar pendências concluídas que foram assumidas por mim (mais fácil de encontrar na aba Concluídas)
+                const aMine = isAssignedToMe(a) ? 1 : 0;
+                const bMine = isAssignedToMe(b) ? 1 : 0;
+                if (aMine !== bMine) return bMine - aMine;
+
+                const aCompleted = new Date(a.completedAt || a.completed_at || a.updatedAt || a.updated_at || a.createdAt || a.created_at || 0).getTime();
+                const bCompleted = new Date(b.completedAt || b.completed_at || b.updatedAt || b.updated_at || b.createdAt || b.created_at || 0).getTime();
+                return bCompleted - aCompleted;
+            });
             const totalPendencies = visiblePendencies.length;
             const urgentPendencies = visiblePendencies.filter(p => p.priority === 'urgent' || p.priority === 'Urgente').length;
             const myPendingCount = pendingPendencies.length;
@@ -8626,17 +8962,24 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                             <option value="medium">Média</option>
                             <option value="low">Baixa</option>
                         </select>
+                        ${assigneeFilterEnabled ? `
+                        <select id="pendencyAssigneeFilter" onchange="setPendencyAssigneeFilterMode(this.value)" style="padding: 8px 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 6px; color: var(--white-soft); font-size: 14px; cursor: pointer;">
+                            <option value="mine" ${assigneeFilterMode === 'mine' ? 'selected' : ''}>Somente minhas (assumidas)</option>
+                            <option value="unassigned" ${assigneeFilterMode === 'unassigned' ? 'selected' : ''}>Sem responsável</option>
+                            <option value="all" ${assigneeFilterMode === 'all' ? 'selected' : ''}>Todas</option>
+                        </select>
+                        ` : ''}
                         <input type="text" id="pendencySearchInput" placeholder="Buscar pendências..." onkeyup="filterPendencies()" style="flex: 1; min-width: 200px; padding: 8px 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 6px; color: var(--white-soft); font-size: 14px;">
                         <button class="btn btn-secondary" onclick="clearPendencyFilters()" style="padding: 8px 16px;">
                             <i class="fas fa-times"></i> Limpar
                         </button>
                     </div>
                 </div>
-                ${canApprove && sortedPending.length > 0 ? `
+                ${sortedPending.length > 0 ? `
                 <div style="margin-bottom: 32px;">
                     <h2 style="font-size: 20px; font-weight: 600; color: var(--white-soft); margin-bottom: 16px;">
                         <i class="fas fa-hourglass-half" style="color: var(--danger); margin-right: 8px;"></i>
-                        Aguardando Aprovação (${sortedPending.length})
+                        Pendentes (${sortedPending.length})
                     </h2>
                     <div style="display: grid; gap: 16px;" id="pendingPendenciesList">
                         ${sortedPending.map(p => renderPendencyCard(p, canApprovePendency(p), canEdit, false)).join('')}
@@ -8654,7 +8997,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                     </div>
                 </div>
                 ` : ''}
-                ${canApprove && sortedApproved.length > 0 ? `
+                ${sortedApproved.length > 0 ? `
                 <div style="margin-bottom: 32px;">
                     <details style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border);">
                         <summary style="cursor: pointer; color: var(--white-soft); font-size: 18px; font-weight: 600; margin-bottom: 16px; user-select: none;">
@@ -8667,12 +9010,12 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                     </details>
                 </div>
                 ` : ''}
-                ${canApprove && sortedRejected.length > 0 ? `
+                ${sortedRejected.length > 0 ? `
                 <div style="margin-bottom: 32px;">
                     <details style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border);">
                         <summary style="cursor: pointer; color: var(--white-soft); font-size: 18px; font-weight: 600; margin-bottom: 16px; user-select: none;">
                             <i class="fas fa-times" style="color: var(--danger); margin-right: 8px;"></i>
-                            Rejeitadas (${sortedRejected.length})
+                            Reprovadas (${sortedRejected.length})
                         </summary>
                         <div style="display: grid; gap: 16px; margin-top: 16px;" id="rejectedPendenciesList">
                             ${sortedRejected.slice(0, 10).map(p => renderPendencyCard(p, canApprovePendency(p), canEdit, false)).join('')}
@@ -8700,8 +9043,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                             Concluídas (${completedPendencies.length})
                         </summary>
                         <div style="display: grid; gap: 16px; margin-top: 16px;">
-                            ${completedPendencies.slice(0, 10).map(p => renderPendencyCard(p, canApprovePendency(p), false, true)).join('')}
-                            ${completedPendencies.length > 10 ? `<p style="color: var(--gray-text); font-size: 12px; text-align: center; margin-top: 8px;">Mostrando últimos 10. Total: ${completedPendencies.length}</p>` : ''}
+                            ${sortedCompletedPendencies.slice(0, 10).map(p => renderPendencyCard(p, canApprovePendency(p), false, true)).join('')}
+                            ${completedPendencies.length > 10 ? `<p style="color: var(--gray-text); font-size: 12px; text-align: center; margin-top: 8px;">Mostrando últimas 10. Total: ${completedPendencies.length}</p>` : ''}
                         </div>
                     </details>
                 </div>
@@ -8717,9 +9060,10 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 ` : ''}
             `;
             document.querySelector('.content-card').innerHTML = content;
+            try { filterPendencies(); } catch (e) {}
         }
         
-        function renderPendencyCard(pendency, canApprove, canEdit, isCompleted = false) {
+        function renderPendencyCard(pendency, canApprove, canEdit, isCompleted = false, ignoreFilters = false) {
             const priority = pendency.priority || 'medium';
             const priorityColors = {
                 'urgent': { bg: 'var(--danger)', text: 'white', label: 'Urgente' },
@@ -8752,6 +9096,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             const isActuallyCompleted = isCompleted || normalizedStatus === 'completed';
             const assignedUserId = String(pendency?.assignedUserId ?? pendency?.assigned_user_id ?? '').trim();
             const assignedUserName = (pendency?.assignedUserName ?? pendency?.assigned_user_name ?? '').toString().trim();
+            const isAssignee = isCurrentUserId(assignedUserId) || isCurrentUserName(assignedUserName);
+            const canWork = !!(canApprove || isAssignee);
             const assignedLabel = assignedUserName
                 ? assignedUserName
                 : (assignedUserId ? `ID ${assignedUserId}` : 'Sem responsável');
@@ -8776,7 +9122,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             const dueDate = pendency.dueDate || pendency.due_date;
             const isOverdue = dueDate && new Date(dueDate) < new Date() && (normalizedStatus === 'pending' || normalizedStatus === 'in_progress' || normalizedStatus === 'approved');
             return `
-                <div class="pendency-card" data-pendency-id="${pendency.id}" data-status="${normalizedStatus}" data-priority="${priority}" data-type="${pendency.type}" style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border); ${isActuallyCompleted ? 'opacity: 0.7;' : ''} ${isOverdue ? 'border-left: 4px solid var(--danger);' : ''}">
+                <div class="pendency-card" data-filter-ignore="${ignoreFilters ? '1' : '0'}" data-pendency-id="${pendency.id}" data-status="${normalizedStatus}" data-priority="${priority}" data-type="${pendency.type}" data-assignee-id="${escapeHtml(assignedUserId || '')}" style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border); ${isActuallyCompleted ? 'opacity: 0.7;' : ''} ${isOverdue ? 'border-left: 4px solid var(--danger);' : ''}">
                     <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 12px; flex-wrap: wrap; gap: 12px;">
                         <div style="flex: 1;">
                             <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap;">
@@ -8800,11 +9146,11 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                             <button class="btn-modal btn-success" style="padding: 6px 12px; font-size: 12px;" onclick="approvePendency(${pendency.id})" title="Aprovar"><i class="fas fa-check"></i></button>
                             <button class="btn-modal btn-danger" style="padding: 6px 12px; font-size: 12px;" onclick="rejectPendency(${pendency.id})" title="Rejeitar"><i class="fas fa-times"></i></button>
                             ` : ''}
-                            ${!isActuallyCompleted && canApprove && normalizedStatus === 'approved' ? `
+                            ${!isActuallyCompleted && canWork && normalizedStatus === 'approved' ? `
                             <button class="btn-modal btn-primary" style="padding: 6px 12px; font-size: 12px;" onclick="startPendency(${pendency.id})" title="Iniciar"><i class="fas fa-play"></i></button>
                             <button class="btn-modal btn-success" style="padding: 6px 12px; font-size: 12px;" onclick="completePendency(${pendency.id})" title="Concluir"><i class="fas fa-check-circle"></i></button>
                             ` : ''}
-                            ${!isActuallyCompleted && canApprove && normalizedStatus === 'in_progress' ? `
+                            ${!isActuallyCompleted && canWork && normalizedStatus === 'in_progress' ? `
                             <button class="btn-modal btn-success" style="padding: 6px 12px; font-size: 12px;" onclick="completePendency(${pendency.id})" title="Concluir"><i class="fas fa-check-circle"></i></button>
                             ` : ''}
                             <button class="btn-modal btn-secondary" style="padding: 6px 12px; font-size: 12px;" onclick="viewPendencyDetails(${pendency.id})" title="Ver detalhes"><i class="fas fa-eye"></i></button>
@@ -8829,12 +9175,14 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             const statusFilter = document.getElementById('pendencyStatusFilter')?.value || 'all';
             const typeFilter = document.getElementById('pendencyTypeFilter')?.value || 'all';
             const priorityFilter = document.getElementById('pendencyPriorityFilter')?.value || 'all';
+            const assigneeFilter = document.getElementById('pendencyAssigneeFilter')?.value || 'all';
             const searchQuery = document.getElementById('pendencySearchInput')?.value.toLowerCase() || '';
-            const cards = document.querySelectorAll('.pendency-card');
+            const cards = document.querySelectorAll('.pendency-card:not([data-filter-ignore="1"])');
             cards.forEach(card => {
                 const status = card.getAttribute('data-status') || '';
                 const priority = card.getAttribute('data-priority') || '';
                 const type = card.getAttribute('data-type') || '';
+                const assigneeId = (card.getAttribute('data-assignee-id') || '').toString().trim();
                 const text = card.textContent.toLowerCase();
                 let show = true;
                 if (statusFilter !== 'all') {
@@ -8859,15 +9207,38 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                     const validPriorities = priorityMap[priorityFilter] || [];
                     if (!validPriorities.some(p => priority.toLowerCase().includes(p.toLowerCase()))) show = false;
                 }
+                if (assigneeFilter !== 'all' && show) {
+                    const meId = (typeof getCurrentUserIdString === 'function')
+                        ? (getCurrentUserIdString() || '')
+                        : (String(currentUser?.id ?? '') || '');
+                    const me = String(meId).trim();
+                    if (assigneeFilter === 'mine') {
+                        if (!me || !assigneeId || assigneeId !== me) show = false;
+                    } else if (assigneeFilter === 'unassigned') {
+                        if (assigneeId) show = false;
+                    }
+                }
                 if (searchQuery && show && !text.includes(searchQuery)) show = false;
                 card.style.display = show ? 'block' : 'none';
             });
+        }
+
+        function setPendencyAssigneeFilterMode(mode) {
+            pendencyAssigneeFilterMode = String(mode || 'all');
+            filterPendencies();
         }
         
         function clearPendencyFilters() {
             if (document.getElementById('pendencyStatusFilter')) document.getElementById('pendencyStatusFilter').value = 'all';
             if (document.getElementById('pendencyTypeFilter')) document.getElementById('pendencyTypeFilter').value = 'all';
             if (document.getElementById('pendencyPriorityFilter')) document.getElementById('pendencyPriorityFilter').value = 'all';
+            if (document.getElementById('pendencyAssigneeFilter')) {
+                const isCLevel = isCLevelRole(currentUser?.roles || currentUser?.role);
+                const isDev = isDevRole(currentUser?.roles || currentUser?.role);
+                const mode = 'all';
+                pendencyAssigneeFilterMode = mode;
+                document.getElementById('pendencyAssigneeFilter').value = mode;
+            }
             if (document.getElementById('pendencySearchInput')) document.getElementById('pendencySearchInput').value = '';
             filterPendencies();
         }
@@ -10603,24 +10974,48 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
 
         // ========== SISTEMA DE RANKING E ESTATÍSTICAS ==========
         async function loadRanking() {
-            // Calcular estatísticas para cada staff
-            const staffStatsPromises = staffData.map(async (staff) => {
-                const tasksCompleted = await getCompletedTasksByStaff(staff.id);
+            const navSeq = activeNavSeq;
+            try { renderSectionLoading('📊 Ranking e Estatísticas'); } catch (e) {}
+            await nextFrame();
+
+            // Carregar dados necessários em paralelo (sem N requests)
+            const [staffRows, chatRows] = await Promise.all([
+                getData('txd_staff', false),
+                getData('txd_chat_messages', false),
+                ensureKanbanLoaded(false),
+                ensurePendenciesLoaded(false)
+            ]).then(r => [r[0], r[1]]);
+
+            if (navSeq !== activeNavSeq) return;
+            if (Array.isArray(staffRows)) staffData = staffRows;
+            if (Array.isArray(chatRows)) chatMessages = chatRows;
+
+            const kanbanData = getKanbanSnapshotFromState();
+            const cards = Array.isArray(kanbanData?.cards) ? kanbanData.cards : [];
+
+            // Contagem de tarefas concluídas por nome (assignee)
+            const doneByAssignee = new Map();
+            cards.forEach(card => {
+                if (!card) return;
+                const columnId = card.columnId || card.column_id || '';
+                if (columnId !== 'done') return;
+                const assignees = getCardAssigneeList(card);
+                assignees.forEach(name => {
+                    const key = normalizePersonLabel(name);
+                    if (!key) return;
+                    doneByAssignee.set(key, (doneByAssignee.get(key) || 0) + 1);
+                });
+            });
+
+            const staffList = Array.isArray(staffData) ? staffData : [];
+            const staffStats = staffList.map(staff => {
+                const label = normalizePersonLabel(staff.displayName || staff.name || '');
+                const tasksCompleted = label ? (doneByAssignee.get(label) || 0) : 0;
                 const pendenciasResolved = getResolvedPendenciesByStaff(staff.id);
                 const messagesCount = getMessagesByStaff(staff.id);
                 const score = (tasksCompleted * 10) + (pendenciasResolved * 15) + (messagesCount * 2);
-                
-                return {
-                    ...staff,
-                    tasksCompleted,
-                    pendenciasResolved,
-                    messagesCount,
-                    score
-                };
+                return { ...staff, tasksCompleted, pendenciasResolved, messagesCount, score };
             });
-            
-            // Aguardar todas as promessas
-            const staffStats = await Promise.all(staffStatsPromises);
             
             // Ordenar por pontuação
             staffStats.sort((a, b) => b.score - a.score);
@@ -10749,7 +11144,9 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         // Funções auxiliares para cálculo de estatísticas
         async function getCompletedTasksByStaff(staffId) {
             try {
-                const kanbanData = await getKanbanData();
+                // Usa o state em memória (evita N requests ao navegar)
+                await ensureKanbanLoaded(false);
+                const kanbanData = getKanbanSnapshotFromState();
                 const staff = staffData.find(s => s.id === staffId);
                 if (!staff) return 0;
                 
@@ -10958,8 +11355,33 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         ];
 
         async function loadAchievements() {
-            const userAchievements = getData('txd_user_achievements') || {};
-            const currentUserAchievements = userAchievements[currentUser.id] || [];
+            const navSeq = activeNavSeq;
+            try { renderSectionLoading('🏆 Conquistas'); } catch (e) {}
+            await nextFrame();
+
+            // Garantir dados necessários (evita condições assíncronas dispararem múltiplos fetches)
+            const [staffRows, chatRows, achievementsRows] = await Promise.all([
+                getData('txd_staff', false),
+                getData('txd_chat_messages', false),
+                getData('txd_user_achievements', false),
+                ensureKanbanLoaded(false),
+                ensurePendenciesLoaded(false)
+            ]).then(r => [r[0], r[1], r[2]]);
+
+            if (navSeq !== activeNavSeq) return;
+            if (Array.isArray(staffRows)) staffData = staffRows;
+            if (Array.isArray(chatRows)) chatMessages = chatRows;
+
+            const allRows = Array.isArray(achievementsRows) ? achievementsRows : (Array.isArray(dataCache['txd_user_achievements']) ? dataCache['txd_user_achievements'] : []);
+            dataCache['txd_user_achievements'] = allRows;
+
+            const myId = String(currentUser?.id ?? '').trim();
+            const currentUserAchievements = allRows
+                .filter(r => isSameUserId(r?.userId ?? r?.user_id, myId))
+                .map(r => (r?.achievementId ?? r?.achievement_id ?? '').toString())
+                .filter(Boolean);
+
+            const newlyUnlocked = [];
             
             // Verificar todas as conquistas (aguardar condições assíncronas)
             for (const achievement of ACHIEVEMENTS) {
@@ -10970,6 +11392,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                             : achievement.condition();
                         if (conditionResult) {
                             currentUserAchievements.push(achievement.id);
+                            newlyUnlocked.push(achievement.id);
                         }
                     } catch (error) {
                         console.error(`Erro ao verificar conquista ${achievement.id}:`, error);
@@ -10977,9 +11400,20 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 }
             }
             
-            // Salvar conquistas atualizadas
-            userAchievements[currentUser.id] = currentUserAchievements;
-            saveData('txd_user_achievements', userAchievements);
+            // Salvar apenas novas conquistas (evita upsert gigante / lag)
+            if (newlyUnlocked.length > 0) {
+                const nowIso = new Date().toISOString();
+                const rowsToUpsert = newlyUnlocked.map(id => ({
+                    userId: currentUser.id,
+                    userName: String(currentUser?.displayName || currentUser?.name || '').trim() || null,
+                    achievementId: id,
+                    unlockedAt: nowIso
+                }));
+                saveData('txd_user_achievements', rowsToUpsert).catch(() => {});
+                // Atualizar cache local
+                rowsToUpsert.forEach(r => allRows.push(r));
+                dataCache['txd_user_achievements'] = allRows;
+            }
             
             const unlockedCount = currentUserAchievements.length;
             const totalCount = ACHIEVEMENTS.length;
@@ -11088,28 +11522,45 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         }
 
         function checkAndUnlockAchievement(achievementId) {
-            const userAchievements = getData('txd_user_achievements') || {};
-            const currentUserAchievements = userAchievements[currentUser.id] || [];
-            
-            if (!currentUserAchievements.includes(achievementId)) {
+            try {
+                const allRows = Array.isArray(dataCache['txd_user_achievements']) ? dataCache['txd_user_achievements'] : [];
+                const myId = String(currentUser?.id ?? '').trim();
+                if (!myId) return;
+
+                const already = allRows.some(r => isSameUserId(r?.userId ?? r?.user_id, myId) && String(r?.achievementId ?? r?.achievement_id) === String(achievementId));
+                if (already) return;
+
                 const achievement = ACHIEVEMENTS.find(a => a.id === achievementId);
-                if (achievement && achievement.condition()) {
-                    currentUserAchievements.push(achievementId);
-                    userAchievements[currentUser.id] = currentUserAchievements;
-                    saveData('txd_user_achievements', userAchievements);
-                    
-                    // Mostrar notificação
+                if (!achievement) return;
+
+                const maybe = achievement.condition ? achievement.condition() : false;
+                const unlock = (ok) => {
+                    if (!ok) return;
+                    const row = {
+                        userId: currentUser.id,
+                        userName: String(currentUser?.displayName || currentUser?.name || '').trim() || null,
+                        achievementId: achievementId,
+                        unlockedAt: new Date().toISOString()
+                    };
+                    allRows.push(row);
+                    dataCache['txd_user_achievements'] = allRows;
+                    saveData('txd_user_achievements', [row]).catch(() => {});
+
                     showAchievementNotification(achievement);
-                    
-                    // Notificar Discord
                     sendDiscordNotification('achievements', '🏆 Conquista Desbloqueada!', `${currentUser?.displayName || currentUser?.name || 'Usuário'} desbloqueou uma nova conquista!`, [
                         { name: '🎖️ Conquista', value: achievement.title || 'Conquista', inline: false },
                         { name: '📝 Descrição', value: achievement.description || 'Sem descrição', inline: false },
                         { name: '🎁 Recompensa', value: achievement.reward || 'N/A', inline: true },
                         { name: '👤 Staff', value: currentUser?.displayName || currentUser?.name || 'Usuário', inline: true }
                     ]);
+                };
+
+                if (maybe && typeof maybe.then === 'function') {
+                    maybe.then(unlock).catch(() => {});
+                } else {
+                    unlock(!!maybe);
                 }
-            }
+            } catch (e) {}
         }
 
         function showAchievementNotification(achievement) {
@@ -13975,7 +14426,6 @@ processDiscordCommand() diretamente.
             const canManage = hasPermission('pendency.approve') || hasPermission('dashboard') || isCLevelRole(currentUser?.roles || currentUser?.role) || isDevRole(currentUser?.roles || currentUser?.role);
             const isRequester = isCurrentUserId(pendency.userId ?? pendency.user_id);
             const isAssignedToMe = assignedUserId ? isCurrentUserId(assignedUserId) : false;
-            const canAssume = canManage && !isRequester && (!assignedUserId || !isAssignedToMe);
             const priorityColors = {
                 urgent: { bg: 'var(--danger)', label: 'Urgente' },
                 high: { bg: 'var(--danger)', label: 'Alta' },
@@ -14002,6 +14452,7 @@ processDiscordCommand() diretamente.
                 rejected: 'Rejeitada'
             };
             const normalizedStatus = normalizePendencyStatusValue(pendency?.status, pendency);
+            const canAssume = canManage && !isRequester && !['completed', 'rejected'].includes(normalizedStatus) && (!assignedUserId || !isAssignedToMe);
             const createdAt = new Date(pendency.createdAt || pendency.created_at || 0);
             const updatedAt = new Date(pendency.updatedAt || pendency.updated_at || createdAt);
             const dueDate = pendency.dueDate || pendency.due_date;
@@ -14015,7 +14466,7 @@ processDiscordCommand() diretamente.
                             <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center;">
                                 <span class="badge" style="background: ${priorityInfo.bg}; color: white; padding: 6px 16px; border-radius: 6px; font-size: 13px; font-weight: 600;">${priorityInfo.label}</span>
                                 <span class="badge badge-secondary">${typeLabels[pendency.type] || pendency.type}</span>
-                                <span class="badge badge-primary">${statusLabels[normalizedStatus] || normalizedStatus}</span>
+                                <span class="badge badge-primary" id="pendencyStatusBadge">${statusLabels[normalizedStatus] || normalizedStatus}</span>
                                 ${isFinancialPendencyType(pendency.type) ? '<span class="badge badge-danger">Somente C-Level</span>' : ''}
                             </div>
                         </div>
@@ -14151,6 +14602,24 @@ processDiscordCommand() diretamente.
                 return;
             }
 
+            const normalizedStatus = normalizePendencyStatusValue(pendency?.status, pendency);
+            if (normalizedStatus === 'completed' || normalizedStatus === 'rejected') {
+                alert('Esta pendência já foi finalizada e não pode ser assumida.');
+                return;
+            }
+
+            const isCLevel = isCLevelRole(currentUser?.roles || currentUser?.role);
+            const isDev = isDevRole(currentUser?.roles || currentUser?.role);
+            const scope = getPendencyScope(pendency?.type);
+            if (scope === 'financial' && !isCLevel) {
+                alert('Pendências financeiras só podem ser assumidas por C-Level.');
+                return;
+            }
+            if (scope === 'dev' && !(isDev || isCLevel)) {
+                alert('Pendências de desenvolvimento só podem ser assumidas por Desenvolvedores ou C-Level.');
+                return;
+            }
+
             const requesterId = pendency?.userId ?? pendency?.user_id ?? null;
             if (isSameUserId(requesterId, myId)) {
                 alert('Você não pode assumir a própria pendência.');
@@ -14171,10 +14640,22 @@ processDiscordCommand() diretamente.
 
             return withIdempotency(`pendency:assign:${pid}`, async () => {
                 try {
+                    const nowIso = new Date().toISOString();
+                    const destination = getEffectivePendencyArea(pendency) || inferPendencyAreaFromType(pendency?.type);
+                    const assignedRole = destination === 'clevel'
+                        ? 'clevel'
+                        : (destination === 'dev' ? 'dev' : (isCLevel ? 'clevel' : (isDev ? 'dev' : null)));
+                    const nextStatus = (normalizedStatus === 'pending' || normalizedStatus === 'approved')
+                        ? 'in_progress'
+                        : (normalizedStatus || 'in_progress');
+
                     const patch = {
                         assignedUserId: myId,
                         assignedUserName: String(currentUser?.displayName || currentUser?.name || '').trim() || `ID ${myId}`,
-                        assignedAt: new Date().toISOString()
+                        assignedAt: nowIso,
+                        destination,
+                        assignedRole,
+                        status: nextStatus
                     };
 
                     const mergedAttachments = mergePendencyAttachmentsMeta(pendency.attachments, patch);
@@ -14187,10 +14668,12 @@ processDiscordCommand() diretamente.
 
                     // Preferir salvar nos campos dedicados quando existirem (e manter meta em attachments para compatibilidade)
                     const updateBase = {
-                        destination: 'dev',
-                        assigned_role: 'dev',
+                        destination: destination || null,
+                        assigned_role: assignedRole || null,
                         assigned_user_id: myId,
                         assigned_user_name: patch.assignedUserName,
+                        status: nextStatus,
+                        updated_at: nowIso,
                         attachments: mergedAttachments
                     };
 
@@ -14209,15 +14692,22 @@ processDiscordCommand() diretamente.
                         isMissingColumn(error, 'assigned_user_name')
                     )) {
                         console.warn('[pendencies] Colunas de atribuição/destino ausentes; assumindo apenas via attachments._meta.', error);
-                        ({ data: saved, error } = await attemptUpdate({ attachments: mergedAttachments }));
+                        ({ data: saved, error } = await attemptUpdate({ status: nextStatus, updated_at: nowIso, attachments: mergedAttachments }));
                     } else if (error && isMissingColumn(error, 'attachments')) {
                         console.warn('[pendencies] Coluna attachments ausente; assumindo apenas via colunas assigned_*.', error);
                         ({ data: saved, error } = await attemptUpdate({
-                            destination: 'dev',
-                            assigned_role: 'dev',
+                            destination: destination || null,
+                            assigned_role: assignedRole || null,
                             assigned_user_id: myId,
-                            assigned_user_name: patch.assignedUserName
+                            assigned_user_name: patch.assignedUserName,
+                            status: nextStatus,
+                            updated_at: nowIso
                         }));
+                    } else if (error && isMissingColumn(error, 'updated_at')) {
+                        console.warn('[pendencies] Coluna updated_at ausente; salvando sem updated_at.', error);
+                        const withoutUpdatedAt = { ...updateBase };
+                        delete withoutUpdatedAt.updated_at;
+                        ({ data: saved, error } = await attemptUpdate(withoutUpdatedAt));
                     }
 
                     if (error) throw error;
@@ -14235,6 +14725,38 @@ processDiscordCommand() diretamente.
                     if (btnEl) {
                         btnEl.classList.add('hidden');
                     }
+                    const statusBadgeEl = document.getElementById('pendencyStatusBadge');
+                    if (statusBadgeEl) {
+                        const labels = { pending: 'Pendente', in_progress: 'Em Andamento', approved: 'Aprovada', completed: 'Concluída', rejected: 'Rejeitada' };
+                        statusBadgeEl.textContent = labels[nextStatus] || nextStatus;
+                    }
+
+                    // Se a lista estiver aberta, garantir que o filtro fique "somente minhas" após assumir
+                    try {
+                        const assigneeEl = document.getElementById('pendencyAssigneeFilter');
+                        if (assigneeEl) {
+                            pendencyAssigneeFilterMode = 'mine';
+                            assigneeEl.value = 'mine';
+                        }
+                        filterPendencies();
+                    } catch (e) {}
+
+                    // Notificação persistente para o solicitante (se existir inbox)
+                    createNotification({
+                        type: 'pendency_assigned',
+                        title: '👤 Pendência assumida',
+                        body: `#${pid} • ${(pendency?.title || 'Sem título')}\nResponsável: ${patch.assignedUserName}`,
+                        audience: 'user',
+                        audienceUserId: requesterId,
+                        entityType: 'pendency',
+                        entityId: pid,
+                        metadata: {
+                            actorUserId: myId,
+                            actorName: String(currentUser?.displayName || currentUser?.name || ''),
+                            status: nextStatus,
+                            destination
+                        }
+                    }).catch(() => {});
 
                     try { showToast({ title: '✅ Pendência assumida', message: `Você assumiu a pendência #${pid}.`, variant: 'success' }); } catch (e) {}
                 } catch (err) {
@@ -16298,6 +16820,28 @@ processDiscordCommand() diretamente.
             return ISSUE_SEVERITIES.find(s => s.value === value) || { label: value, color: 'var(--gray-text)' };
         }
 
+        function getCategoryBadgeStyle(rawCategory) {
+            const category = (rawCategory || '').toString().toLowerCase().trim();
+            const fallback = {
+                bg: 'rgba(255,255,255,0.08)',
+                border: 'rgba(255,255,255,0.14)',
+                text: 'var(--white-soft)'
+            };
+
+            const map = {
+                mapas: { bg: 'rgba(59,130,246,0.14)', border: 'rgba(59,130,246,0.35)', text: '#3b82f6' },
+                bugs: { bg: 'rgba(255,51,102,0.14)', border: 'rgba(255,51,102,0.35)', text: 'var(--danger)' },
+                carros: { bg: 'rgba(255,170,0,0.14)', border: 'rgba(255,170,0,0.35)', text: 'var(--warning)' },
+                roupas: { bg: 'rgba(236,72,153,0.14)', border: 'rgba(236,72,153,0.35)', text: '#ec4899' },
+                itens: { bg: 'rgba(0,255,136,0.12)', border: 'rgba(0,255,136,0.30)', text: 'var(--success)' },
+                coordenadas: { bg: 'rgba(34,211,238,0.14)', border: 'rgba(34,211,238,0.35)', text: '#22d3ee' },
+                logs: { bg: 'rgba(111,114,118,0.14)', border: 'rgba(111,114,118,0.35)', text: 'var(--gray-very-light)' },
+                atualizacoes: { bg: 'rgba(0,168,255,0.18)', border: 'rgba(0,168,255,0.45)', text: 'var(--primary)' }
+            };
+
+            return map[category] || fallback;
+        }
+
         function normalizeCategoryLabel(value) {
             const found = ISSUE_CATEGORIES.find(c => c.value === value);
             return found ? found.label : '';
@@ -16628,13 +17172,14 @@ processDiscordCommand() diretamente.
                 const assignedTo = issue.assigned_to || 'Nao atribuido';
                 const { category, cleanTitle } = extractCategoryFromTitle(issue.title || '');
                 const categoryLabel = normalizeCategoryLabel(category);
+                const categoryBadge = getCategoryBadgeStyle(category);
                 const quickSelectId = `issueQuickStatus-${issue.id}`;
                 return `
                     <div style="background: var(--gray-dark); border-radius: 12px; padding: 20px; border: 1px solid var(--gray-border); display: grid; gap: 12px;">
                         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
                             <div style="font-size: 16px; font-weight: 700; color: var(--white-soft);">${escapeHtml(cleanTitle || issue.title)}</div>
                             <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                                ${categoryLabel ? `<span style="background: rgba(255,255,255,0.08); color: var(--white-soft); padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;">${categoryLabel}</span>` : ''}
+                                ${categoryLabel ? `<span style="background: ${categoryBadge.bg}; border: 1px solid ${categoryBadge.border}; color: ${categoryBadge.text}; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 800;">${categoryLabel}</span>` : ''}
                                 <span style="background: ${statusMeta.color}; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;">${statusMeta.label}</span>
                                 <span style="background: rgba(255,255,255,0.08); color: var(--white-soft); padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;">${severityMeta.label}</span>
                             </div>
@@ -16800,7 +17345,11 @@ processDiscordCommand() diretamente.
             }
 
             const devPendencies = Array.from(state?.pendencies?.byId?.values?.() || [])
-                .filter(p => getEffectivePendencyArea(p) === 'dev')
+                .filter(p => {
+                    const area = getEffectivePendencyArea(p);
+                    const scope = getPendencyScope(p?.type);
+                    return area === 'dev' || scope === 'dev';
+                })
                 .filter(p => {
                     const st = normalizePendencyStatusValue(p?.status, p);
                     return st !== 'completed' && st !== 'rejected';
@@ -16808,6 +17357,27 @@ processDiscordCommand() diretamente.
                 .sort((a, b) => {
                     const aTime = new Date(a.createdAt || a.created_at || 0).getTime();
                     const bTime = new Date(b.createdAt || b.created_at || 0).getTime();
+                    return bTime - aTime;
+                });
+
+            const assumedPendencies = Array.from(state?.pendencies?.byId?.values?.() || [])
+                .filter(p => {
+                    const area = getEffectivePendencyArea(p);
+                    const scope = getPendencyScope(p?.type);
+                    return area === 'dev' || scope === 'dev';
+                })
+                .filter(p => {
+                    const assignedUserId = p?.assignedUserId ?? p?.assigned_user_id ?? null;
+                    const assignedUserName = p?.assignedUserName ?? p?.assigned_user_name ?? null;
+                    return isCurrentUserId(assignedUserId) || isCurrentUserName(assignedUserName);
+                })
+                .filter(p => {
+                    const st = normalizePendencyStatusValue(p?.status, p);
+                    return st !== 'completed' && st !== 'rejected';
+                })
+                .sort((a, b) => {
+                    const aTime = new Date(a.updatedAt || a.updated_at || a.createdAt || a.created_at || 0).getTime();
+                    const bTime = new Date(b.updatedAt || b.updated_at || b.createdAt || b.created_at || 0).getTime();
                     return bTime - aTime;
                 });
 
@@ -16819,12 +17389,13 @@ processDiscordCommand() diretamente.
                 const createdLabel = createdAt ? new Date(createdAt).toLocaleDateString('pt-BR') : '';
                 const type = (p?.type || '').toString();
                 const typeLabel = type ? type.toUpperCase() : 'DEV';
+                const typeBadge = getCategoryBadgeStyle(type);
                 return `
                     <div style="display:flex; justify-content: space-between; gap: 12px; align-items:flex-start; padding: 12px; border-radius: 12px; background: var(--gray-medium); border: 1px solid var(--gray-border);">
                         <div style="min-width: 220px; flex: 1;">
                             <div style="display:flex; gap: 10px; flex-wrap: wrap; align-items:center;">
                                 <div style="color: var(--white-soft); font-weight: 800;">#${escapeHtml(String(p.id || ''))} • ${escapeHtml(p.title || 'Sem título')}</div>
-                                <span style="padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 800; background: rgba(0,168,255,.12); border: 1px solid rgba(0,168,255,.35); color: var(--primary);">${escapeHtml(typeLabel)}</span>
+                                <span style="padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 900; background: ${typeBadge.bg}; border: 1px solid ${typeBadge.border}; color: ${typeBadge.text};">${escapeHtml(typeLabel)}</span>
                                 <span style="padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 800; background: rgba(255,170,0,.10); border: 1px solid rgba(255,170,0,.35); color: var(--warning);">${escapeHtml(statusLabel)}</span>
                             </div>
                             <div style="margin-top: 8px; color: var(--gray-text); font-size: 12px; display:flex; gap: 14px; flex-wrap: wrap;">
@@ -16856,10 +17427,10 @@ processDiscordCommand() diretamente.
                     <div style="display:flex; justify-content: space-between; align-items:center; gap: 12px; flex-wrap: wrap;">
                         <div>
                             <div style="color: var(--white-soft); font-weight: 900; font-size: 14px;">
-                                <i class="fas fa-clipboard-list" style="color: var(--primary);"></i> Pendências DEV (triagem)
+                                <i class="fas fa-clipboard-list" style="color: var(--primary);"></i> Pendências de desenvolvimento (triagem)
                             </div>
                             <div style="color: var(--gray-text); font-size: 12px; margin-top: 6px;">
-                                Pendências com destino DEV aparecem aqui para triagem (ver detalhes e assumir).
+                                Pendências de desenvolvimento (ex: MAPAS/BUGS/ITENS) aparecem aqui para triagem (ver detalhes e assumir).
                             </div>
                         </div>
                         <div style="display:flex; gap: 10px; align-items:center; flex-wrap: wrap;">
@@ -16878,58 +17449,27 @@ processDiscordCommand() diretamente.
                         ${devPendencies.length > 8 ? `<div style="color: var(--gray-text); font-size: 12px; text-align:center; margin-top: 6px;">Mostrando 8 de ${devPendencies.length}. Veja detalhes na aba Pendências.</div>` : ``}
                     </div>
                 </div>
-                <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px;">
-                    <button class="btn-modal btn-secondary" style="padding: 8px 12px; font-size: 12px;" onclick="applyDevQuickFilter('mine')">
-                        <i class="fas fa-user"></i> Minhas
-                    </button>
-                    <button class="btn-modal btn-secondary" style="padding: 8px 12px; font-size: 12px;" onclick="applyDevQuickFilter('unassigned')">
-                        <i class="fas fa-user-slash"></i> Nao atribuidas
-                    </button>
-                    <button class="btn-modal btn-secondary" style="padding: 8px 12px; font-size: 12px;" onclick="applyDevQuickFilter('critical')">
-                        <i class="fas fa-bolt"></i> Criticas
-                    </button>
-                    <button class="btn-modal btn-secondary" style="padding: 8px 12px; font-size: 12px;" onclick="applyDevQuickFilter('blocked')">
-                        <i class="fas fa-ban"></i> Bloqueadas
-                    </button>
-                    <button class="btn-modal btn-secondary" style="padding: 8px 12px; font-size: 12px;" onclick="applyDevQuickFilter('reset')">
-                        <i class="fas fa-undo"></i> Resetar
-                    </button>
+                <div style="margin-bottom: 18px;">
+                    <div style="display:flex; justify-content: space-between; align-items:center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px;">
+                        <div style="color: var(--white-soft); font-weight: 900; font-size: 14px;">
+                            <i class="fas fa-hand-paper" style="color: var(--primary);"></i> Pendências assumidas por você
+                        </div>
+                        <span style="padding: 6px 10px; border-radius: 999px; background: rgba(0,168,255,.10); border: 1px solid rgba(0,168,255,.35); color: var(--primary); font-weight: 900; font-size: 12px;">
+                            ${assumedPendencies.length} ativas
+                        </span>
+                    </div>
+                    ${assumedPendencies.length === 0 ? `
+                        <div style="color: var(--gray-text); font-size: 13px; padding: 10px 6px;">Nenhuma pendência atribuída a você no momento.</div>
+                    ` : `
+                        <div style="display: grid; gap: 16px;">
+                            ${assumedPendencies.slice(0, 12).map(p => renderPendencyCard(p, false, false, false, true)).join('')}
+                            ${assumedPendencies.length > 12 ? `<div style="color: var(--gray-text); font-size: 12px; text-align:center; margin-top: 2px;">Mostrando 12 de ${assumedPendencies.length}. Veja todas na aba Pendências.</div>` : ``}
+                        </div>
+                    `}
                 </div>
-                                <div style="display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); margin-bottom: 24px;">
-                    <button class="btn-modal btn-secondary" style="padding: 10px 12px; font-size: 12px;" onclick="setIssueCategoryFilter('mapas')">MAPAS</button>
-                    <button class="btn-modal btn-secondary" style="padding: 10px 12px; font-size: 12px;" onclick="setIssueCategoryFilter('bugs')">BUGS</button>
-                    <button class="btn-modal btn-secondary" style="padding: 10px 12px; font-size: 12px;" onclick="setIssueCategoryFilter('carros')">CARROS</button>
-                    <button class="btn-modal btn-secondary" style="padding: 10px 12px; font-size: 12px;" onclick="setIssueCategoryFilter('roupas')">ROUPAS</button>
-                    <button class="btn-modal btn-secondary" style="padding: 10px 12px; font-size: 12px;" onclick="setIssueCategoryFilter('itens')">ITENS</button>
-                    <button class="btn-modal btn-secondary" style="padding: 10px 12px; font-size: 12px;" onclick="setIssueCategoryFilter('coordenadas')">COORDENADAS</button>
-                    <button class="btn-modal btn-secondary" style="padding: 10px 12px; font-size: 12px;" onclick="setIssueCategoryFilter('logs')">LOGS</button>
-                    <button class="btn-modal btn-secondary" style="padding: 10px 12px; font-size: 12px;" onclick="setIssueCategoryFilter('atualizacoes')">ATUALIZAÇÕES</button>
-                </div>
-                <div id="devStats" style="margin-bottom: 24px;">
-                    <p style="color: var(--gray-text);">Carregando estatisticas...</p>
-                </div>
-                <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 24px;">
-                    <button class="btn-modal btn-success" onclick="openIssueCreate('dev_create')">
-                        <i class="fas fa-plus"></i> Criar Tarefa
-                    </button>
-                    <button class="btn-modal btn-secondary" onclick="setDevView('board')">
-                        <i class="fas fa-columns"></i> Kanban
-                    </button>
-                    <button class="btn-modal btn-secondary" onclick="setDevView('list')">
-                        <i class="fas fa-list"></i> Lista
-                    </button>
-                </div>
-                ${renderIssueFilters(true)}
-                <div id="issuesBoardContainer" style="display: ${issueUiState.view === 'board' ? 'block' : 'none'};"></div>
-                <div id="issuesListContainer" style="display: ${issueUiState.view === 'list' ? 'block' : 'none'};"></div>
-                <div id="issuesPagination"></div>
+                <!-- Área de tarefas (issues) removida a pedido -->
             `;
             document.querySelector('.content-card').innerHTML = content;
-            syncIssueFilterControls();
-            refreshDevStats().catch(() => {});
-            await populateAssigneeFilter();
-            issueUiState.page = 1;
-            setDevView(issueUiState.view);
         }
 
         function openDevIssueFromPendency(pendencyId) {
@@ -17122,6 +17662,7 @@ processDiscordCommand() diretamente.
             const assignedTo = issue.assigned_to || 'Nao atribuido';
             const { category, cleanTitle } = extractCategoryFromTitle(issue.title || '');
             const categoryLabel = normalizeCategoryLabel(category);
+            const categoryBadge = getCategoryBadgeStyle(category);
 
             const statusOptions = ISSUE_STATUSES.map(s => `<option value="${s.value}" ${s.value === issue.status ? 'selected' : ''}>${s.label}</option>`).join('');
             const severityOptions = ISSUE_SEVERITIES.map(s => `<option value="${s.value}" ${s.value === issue.severity ? 'selected' : ''}>${s.label}</option>`).join('');
@@ -17135,7 +17676,7 @@ processDiscordCommand() diretamente.
                 <h1 id="sectionTitle">Tarefa #${escapeHtml(issue.id)}</h1>
                 <p style="color: var(--gray-light); margin-bottom: 24px;">Detalhes completos da tarefa.</p>
                 <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px;">
-                    ${categoryLabel ? `<span style="background: rgba(255,255,255,0.08); color: var(--white-soft); padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 700;">${categoryLabel}</span>` : ''}
+                    ${categoryLabel ? `<span style="background: ${categoryBadge.bg}; border: 1px solid ${categoryBadge.border}; color: ${categoryBadge.text}; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 800;">${categoryLabel}</span>` : ''}
                     <span style="background: ${statusMeta.color}; color: white; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 700;">${statusMeta.label}</span>
                     <span style="background: rgba(255,255,255,0.08); color: var(--white-soft); padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 700;">${severityMeta.label}</span>
                     <span style="background: rgba(255,255,255,0.08); color: var(--white-soft); padding: 6px 12px; border-radius: 6px; font-size: 12px;">Criado por ${escapeHtml(createdBy)}</span>
@@ -18457,29 +18998,80 @@ processDiscordCommand() diretamente.
         const originalShowSectionFunc = showSection;
         showSection = function(section) {
             if (originalShowSectionFunc) originalShowSectionFunc(section);
-            
-            // Carregar conteúdo imediatamente (usa cache se disponível)
-            loadSectionContent(section);
-            
+
+            // Nova navegação (permite ignorar renders atrasados)
+            const navSeq = bumpNavSeq();
+
+            // Mostrar feedback imediato e renderizar a seção no próximo frame (melhora sensação de velocidade)
+            try { renderSectionLoading('Carregando…'); } catch (e) {}
+            nextFrame().then(() => {
+                if (navSeq !== activeNavSeq) return;
+                loadSectionContent(section);
+            }).catch(() => {
+                // fallback
+                if (navSeq !== activeNavSeq) return;
+                try { loadSectionContent(section); } catch (e) {}
+            });
+
             // Carregar dados em background (não bloqueia renderização)
             loadSectionData(section).catch(err => {
-                console.warn('Erro ao carregar dados da seção em background:', err);
+                debugWarn('Erro ao carregar dados da seção em background:', err);
             });
+
+            // Salvar última seção (persistência)
+            try {
+                const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+                if (raw) {
+                    const parsed = JSON.parse(raw);
+                    parsed.lastSection = String(section || 'inicio');
+                    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(parsed));
+                }
+            } catch (e) {}
         };
 
         // Inicializar
-        renderDevMenuItem();
-        refreshData();
-        if (document.getElementById('dashboard').classList.contains('active')) {
-            loadDashboard();
-        } else {
-            // Carregar conteúdo inicial se não estiver no dashboard
-            const content = `
-                <h1 id="sectionTitle">Bem-vindo ao Painel TXD Staff</h1>
-                <p style="color: var(--gray-light); margin-bottom: 24px;">Selecione uma opção no menu para começar.</p>
-            `;
-            document.getElementById('mainContent').innerHTML = content;
-        }
+        (async function initApp() {
+            const restored = await restoreSessionIfAvailable();
+            if (!restored) {
+                renderDevMenuItem();
+                refreshData();
+            }
+
+            // Prefetch leve para reduzir lag ao trocar abas
+            (function schedulePrefetch() {
+                const run = () => {
+                    // evita estourar requests: pega só o essencial (cache + SWR)
+                    Promise.allSettled([
+                        getData('txd_staff', false),
+                        getData('txd_pendencies', false),
+                        getData('txd_kanban', false),
+                        getData('txd_events', false)
+                    ]).catch(() => {});
+                };
+                try {
+                    if (typeof requestIdleCallback === 'function') {
+                        requestIdleCallback(run, { timeout: 1500 });
+                    } else {
+                        setTimeout(run, 600);
+                    }
+                } catch (e) {
+                    setTimeout(run, 800);
+                }
+            })();
+
+            if (!restored) {
+                if (document.getElementById('dashboard').classList.contains('active')) {
+                    loadDashboard();
+                } else {
+                    // Carregar conteúdo inicial se não estiver no dashboard
+                    const content = `
+                        <h1 id="sectionTitle">Bem-vindo ao Painel TXD Staff</h1>
+                        <p style="color: var(--gray-light); margin-bottom: 24px;">Selecione uma opção no menu para começar.</p>
+                    `;
+                    document.getElementById('mainContent').innerHTML = content;
+                }
+            }
+        })();
     </script>
 
 </body>
