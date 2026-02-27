@@ -36,6 +36,10 @@
             --success: #00ff88;
             --danger: #ff3366;
             --warning: #ffaa00;
+
+            /* Branding / imagens (configurável via Configurações > Geral) */
+            --app-bg-image: url('https://tdatgzjwcuatpqhfococ.supabase.co/storage/v1/object/public/logos/Design%20sem%20nome%20(1).jpg');
+            --login-bg-image: url('https://tdatgzjwcuatpqhfococ.supabase.co/storage/v1/object/public/logos/Design%20sem%20nome%20(3).jpg');
         }
 
         body {
@@ -54,7 +58,7 @@
             left: 0;
             width: 100%;
             height: 100%;
-            background-image: url('https://tdatgzjwcuatpqhfococ.supabase.co/storage/v1/object/public/logos/Design%20sem%20nome%20(1).jpg');
+            background-image: var(--app-bg-image);
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
@@ -98,7 +102,7 @@
             align-items: center;
             min-height: 100vh;
             padding: 20px;
-            background-image: url('https://tdatgzjwcuatpqhfococ.supabase.co/storage/v1/object/public/logos/Design%20sem%20nome%20(3).jpg');
+            background-image: var(--login-bg-image);
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
@@ -1990,27 +1994,20 @@
     <!-- Dashboard -->
     <div id="dashboard" class="dashboard">
         <nav class="navbar">
-            <img src="https://tdatgzjwcuatpqhfococ.supabase.co/storage/v1/object/public/logos/sem-fundo-txd.png" alt="TXD Staff" class="navbar-logo">
+            <img src="https://tdatgzjwcuatpqhfococ.supabase.co/storage/v1/object/public/logos/sem-fundo-txd.png" alt="TXD Staff" class="navbar-logo" style="cursor: pointer;" onclick="showSection('inicio'); return false;" title="Voltar ao início">
             <ul class="nav-menu">
-                <li><a href="#" onclick="showSection('inicio'); return false;" class="active">Início</a></li>
+                <li><a href="#" onclick="showSection('agenda'); return false;">Agenda</a></li>
                 <li><a href="#" onclick="showSection('pendencias'); return false;">📋 Pendências</a></li>
-                <li><a href="#" onclick="showSection('perfil'); return false;">👤 Perfil</a></li>
-                <li><a href="#" onclick="showSection('config'); return false;">Configurações</a></li>
                 <li><a href="#" onclick="showSection('tarefas'); return false;">Tarefas</a></li>
-                <li class="stats-menu-item" id="statsMenuItem">
-                    <a href="#" class="stats-menu-trigger" id="statsMenuTrigger" onclick="toggleStatsMenu(); return false;">📊 Estatísticas <i class="fas fa-chevron-down" style="font-size: 11px;"></i></a>
-                    <div class="stats-submenu">
-                        <a href="#" onclick="showSection('ranking'); return false;">📊 Ranking</a>
-                        <a href="#" onclick="showSection('conquistas'); return false;">🏆 Conquistas</a>
-                    </div>
-                </li>
                 <li><a href="#" onclick="showSection('comandos'); return false;">Comandos</a></li>
                 <li><a href="#" onclick="showSection('votacoes'); return false;">🗳️ Votações</a></li>
-                <li><a href="#" onclick="showSection('controle'); return false;">Controle</a></li>
-                <li><a href="#" onclick="showSection('areas'); return false;">Áreas</a></li>
-                <li><a href="#" onclick="showSection('advertencias'); return false;">Advertências</a></li>
-                <li><a href="#" onclick="showSection('agenda'); return false;">Agenda</a></li>
+                <li><a href="#" onclick="showSection('estatisticas'); return false;">📊 Estatísticas</a></li>
                 <li><a href="#" onclick="showSection('relatorios'); return false;">Relatórios</a></li>
+                <li><a href="#" onclick="showSection('conquistas'); return false;">🏆 Conquistas</a></li>
+                <li><a href="#" onclick="showSection('perfil'); return false;">👤 Perfil</a></li>
+                <li><a href="#" onclick="showSection('areas'); return false;">Áreas</a></li>
+                <li><a href="#" onclick="showSection('controle'); return false;">Controle</a></li>
+                <li><a href="#" onclick="showSection('config'); return false;">Configurações</a></li>
             </ul>
             <div class="navbar-actions">
                 <span id="navbarContextLabel" class="navbar-context hidden"></span>
@@ -2718,6 +2715,47 @@
                     <button type="submit" class="btn btn-primary" style="flex: 1;">
                         <i class="fas fa-save"></i> Salvar Votação
                     </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal: Cargos & Permissões -->
+    <div id="roleModal" class="modal">
+        <div class="modal-content modal-lg">
+            <span class="close" onclick="closeModal('roleModal')">&times;</span>
+            <div class="modal-header">
+                <h2><i class="fas fa-users-cog"></i> <span id="roleModalTitle">Cargo</span></h2>
+            </div>
+            <form id="roleForm" onsubmit="saveRoleFromModal(event)">
+                <input type="hidden" id="roleModalMode" value="create">
+                <input type="hidden" id="roleModalOriginalName" value="">
+
+                <div class="input-group">
+                    <label>Nome do Cargo</label>
+                    <input type="text" id="roleNameInput" placeholder="Ex: Supervisor" required>
+                    <small style="color: var(--gray-text); font-size: 12px; margin-top: 6px; display:block;">
+                        Dica: evite nomes duplicados. Owner/CEO não podem ser alterados.
+                    </small>
+                </div>
+
+                <div style="background: var(--gray-darker); border-radius: 12px; padding: 16px; border: 1px solid var(--gray-border); margin-bottom: 16px;">
+                    <label style="display:flex; align-items:center; gap: 12px; cursor:pointer;">
+                        <input type="checkbox" id="permAllToggle" onchange="toggleAllPermissions(this.checked)" style="width: 18px; height: 18px;">
+                        <span style="color: var(--white-soft); font-weight: 700;">Acesso total (`*`)</span>
+                    </label>
+                    <p style="color: var(--gray-text); font-size: 12px; margin: 8px 0 0 30px;">
+                        Se marcado, o cargo terá acesso total ao sistema.
+                    </p>
+                </div>
+
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px;" id="permissionsGrid">
+                    <!-- preenchido via JS -->
+                </div>
+
+                <div style="display:flex; gap: 10px; margin-top: 18px;">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('roleModal')" style="flex:1;">Cancelar</button>
+                    <button type="submit" class="btn btn-primary" style="flex:1;"><i class="fas fa-save"></i> Salvar</button>
                 </div>
             </form>
         </div>
@@ -3766,6 +3804,24 @@
                             .select('*');
                         if (!achievementsError) data = toCamelCase(achievementsData || []);
                         break;
+
+                    case 'txd_system_settings':
+                        try {
+                            const { data: settingsRow, error: settingsError } = await supabaseClient
+                                .from('system_settings')
+                                .select('*')
+                                .eq('id', 1)
+                                .maybeSingle();
+                            if (!settingsError && settingsRow) {
+                                data = normalizeSystemSettings(toCamelCase(settingsRow));
+                            } else {
+                                // Fallback para localStorage (se a tabela/linha não existir)
+                                data = getSystemSettingsObject();
+                            }
+                        } catch (e) {
+                            data = getSystemSettingsObject();
+                        }
+                        break;
                         
                     case 'txd_discord_config':
                         const { data: configData, error: configError } = await supabaseClient
@@ -4301,6 +4357,36 @@
                             if (error) throw error;
                         }
                         break;
+
+                    case 'txd_system_settings':
+                        if (data && typeof data === 'object' && !Array.isArray(data)) {
+                            const s = normalizeSystemSettings(data);
+                            const payload = {
+                                id: 1,
+                                system_name: s.systemName,
+                                maintenance_mode: !!s.maintenanceMode,
+                                global_message: s.globalMessage || '',
+                                logo_url: s.logoUrl || '',
+                                app_bg_url: s.appBackgroundUrl || '',
+                                login_bg_url: s.loginBackgroundUrl || ''
+                            };
+
+                            const attempt = async (p) => supabaseClient
+                                .from('system_settings')
+                                .upsert(p, { onConflict: 'id' });
+
+                            let { error } = await attempt(payload);
+                            if (error) {
+                                // Se o schema não tiver algumas colunas, tentar salvar com o mínimo
+                                const msg = (error?.message || '').toString().toLowerCase();
+                                const minimal = { id: 1, system_name: s.systemName, maintenance_mode: !!s.maintenanceMode, global_message: s.globalMessage || '', logo_url: s.logoUrl || '' };
+                                if (msg.includes('app_bg_url') || msg.includes('login_bg_url')) {
+                                    ({ error } = await attempt(minimal));
+                                }
+                            }
+                            if (error) throw error;
+                        }
+                        break;
                         
                     case 'txd_discord_config':
                         if (data && typeof data === 'object') {
@@ -4695,6 +4781,107 @@
         const SESSION_STORAGE_KEY = 'txd_staff_session_v1';
         const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 dias
 
+        // Configurações gerais / branding
+        const SYSTEM_SETTINGS_LOCAL_KEY = 'txd_system_settings_local_v1';
+        const DEFAULT_SYSTEM_SETTINGS = {
+            systemName: 'TXD Staff System',
+            maintenanceMode: false,
+            globalMessage: '',
+            logoUrl: '',
+            appBackgroundUrl: '',
+            loginBackgroundUrl: ''
+        };
+
+        function readSystemSettingsLocal() {
+            try {
+                const raw = localStorage.getItem(SYSTEM_SETTINGS_LOCAL_KEY);
+                if (!raw) return null;
+                const parsed = JSON.parse(raw);
+                return (parsed && typeof parsed === 'object') ? parsed : null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function writeSystemSettingsLocal(settings) {
+            try { localStorage.setItem(SYSTEM_SETTINGS_LOCAL_KEY, JSON.stringify(settings || {})); } catch (e) {}
+        }
+
+        function normalizeSystemSettings(input) {
+            const s = (input && typeof input === 'object') ? input : {};
+            return {
+                systemName: (s.systemName ?? s.system_name ?? DEFAULT_SYSTEM_SETTINGS.systemName) || DEFAULT_SYSTEM_SETTINGS.systemName,
+                maintenanceMode: (s.maintenanceMode ?? s.maintenance_mode) === true,
+                globalMessage: (s.globalMessage ?? s.global_message ?? DEFAULT_SYSTEM_SETTINGS.globalMessage) || '',
+                logoUrl: (s.logoUrl ?? s.logo_url ?? DEFAULT_SYSTEM_SETTINGS.logoUrl) || '',
+                appBackgroundUrl: (s.appBackgroundUrl ?? s.app_background_url ?? s.app_bg_url ?? '') || '',
+                loginBackgroundUrl: (s.loginBackgroundUrl ?? s.login_background_url ?? s.login_bg_url ?? '') || ''
+            };
+        }
+
+        function getSystemSettingsObject() {
+            const cached = dataCache?.txd_system_settings;
+            if (cached && typeof cached === 'object' && !Array.isArray(cached)) {
+                return normalizeSystemSettings(cached);
+            }
+            const local = readSystemSettingsLocal();
+            if (local) return normalizeSystemSettings(local);
+            return { ...DEFAULT_SYSTEM_SETTINGS };
+        }
+
+        function safeCssUrl(url) {
+            const raw = (url ?? '').toString().trim();
+            if (!raw) return '';
+            // bloqueia javascript: e data: (evita XSS via CSS url())
+            const lower = raw.toLowerCase();
+            if (lower.startsWith('javascript:') || lower.startsWith('data:')) return '';
+            return raw;
+        }
+
+        function applyBrandingFromSystemSettings(settings) {
+            try {
+                const s = normalizeSystemSettings(settings);
+                const defaultLogoUrl = 'https://tdatgzjwcuatpqhfococ.supabase.co/storage/v1/object/public/logos/sem-fundo-txd.png';
+
+                // Título e nome do sistema
+                try { document.title = s.systemName || document.title; } catch (e) {}
+
+                // Logo: login + navbar
+                const logo = safeCssUrl(s.logoUrl);
+                try {
+                    document.querySelectorAll('img.navbar-logo, img.logo-image').forEach(img => {
+                        if (!img || img.tagName !== 'IMG') return;
+                        img.src = logo || defaultLogoUrl;
+                    });
+                } catch (e) {}
+
+                // Favicon (logo na aba do navegador)
+                try {
+                    const faviconHref = logo || defaultLogoUrl;
+                    const upsertLink = (id, rel) => {
+                        let el = document.getElementById(id);
+                        if (!el) {
+                            el = document.createElement('link');
+                            el.id = id;
+                            el.rel = rel;
+                            document.head.appendChild(el);
+                        }
+                        el.href = faviconHref;
+                    };
+                    upsertLink('appFavicon', 'icon');
+                    upsertLink('appAppleTouchIcon', 'apple-touch-icon');
+                } catch (e) {}
+
+                // Backgrounds (CSS vars)
+                const appBg = safeCssUrl(s.appBackgroundUrl);
+                const loginBg = safeCssUrl(s.loginBackgroundUrl);
+                if (appBg) document.documentElement.style.setProperty('--app-bg-image', `url('${appBg.replace(/'/g, "%27")}')`);
+                else document.documentElement.style.removeProperty('--app-bg-image');
+                if (loginBg) document.documentElement.style.setProperty('--login-bg-image', `url('${loginBg.replace(/'/g, "%27")}')`);
+                else document.documentElement.style.removeProperty('--login-bg-image');
+            } catch (e) {}
+        }
+
         function persistSession(user) {
             try {
                 if (!user) return;
@@ -4746,7 +4933,7 @@
             }
         }
 
-        async function restoreSessionIfAvailable() {
+                async function restoreSessionIfAvailable() {
             const session = readPersistedSession();
             if (!session) return false;
 
@@ -4783,6 +4970,7 @@
 
                 // Atualiza caches em background e volta para a última aba (ou início)
                 refreshData().catch(() => {});
+                try { applyBrandingFromSystemSettings(getSystemSettingsObject()); } catch (e) {}
                 showSection(session.lastSection || 'inicio');
 
                 return true;
@@ -4985,6 +5173,7 @@
 
                     // Persistir sessão (não desloga no F5)
                     persistSession(currentUser);
+                    try { applyBrandingFromSystemSettings(getSystemSettingsObject()); } catch (e) {}
                     
                     // Aplicar permissões ao menu
                     const permissions = getUserPermissionsForRoles(currentUser.roles || currentUser.role);
@@ -5352,6 +5541,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 'chat': '💬 Chat',
                 'ranking': '📊 Ranking',
                 'conquistas': '🏆 Conquistas',
+                'estatisticas': '📊 Estatísticas',
                 'comandos': 'Comandos',
                 'controle': 'Controle de Staff',
                 'areas': 'Áreas de Responsabilidade',
@@ -5376,18 +5566,6 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                     link.classList.add('active');
                 }
             });
-
-            // Menu pai: Estatísticas (Ranking + Conquistas)
-            const statsTrigger = document.getElementById('statsMenuTrigger');
-            if (statsTrigger) {
-                statsTrigger.classList.toggle('active', section === 'ranking' || section === 'conquistas');
-            }
-
-            // Fechar submenus ao navegar
-            const statsItem = document.getElementById('statsMenuItem');
-            if (statsItem) statsItem.classList.remove('open');
-            const devItem = document.getElementById('devMenuItem');
-            if (devItem) devItem.classList.remove('open');
 
             // Contexto no navbar (ex: "Relatório:")
             updateNavbarContext(section);
@@ -5416,6 +5594,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             'chat': 'chat', // Chat específico ou suporte
             'ranking': 'dashboard',
             'conquistas': 'dashboard',
+            'estatisticas': 'dashboard',
             'comandos': 'comandos',
             'controle': 'staff', // Staff ou staff_area
             'areas': 'area', // Area ou staff_area
@@ -5453,6 +5632,68 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             // DEV com acesso total às abas (visualização), além da área DEV
             'Dev': ['*', 'dev_area']
         };
+
+        // Persistência local de cargos/permissões (evita perder ao recarregar)
+        const ROLE_PERMISSIONS_LOCAL_KEY = 'txd_role_permissions_v1';
+        const ROLE_PERMISSIONS_DEFAULT = (() => {
+            try { return JSON.parse(JSON.stringify(ROLE_PERMISSIONS)); } catch (e) { return {}; }
+        })();
+
+        function normalizeRolePermissionsObject(input) {
+            const obj = (input && typeof input === 'object' && !Array.isArray(input)) ? input : {};
+            const out = {};
+            Object.keys(obj).forEach(role => {
+                const perms = obj[role];
+                if (!role || typeof role !== 'string') return;
+                if (!Array.isArray(perms)) return;
+                const cleaned = perms
+                    .map(p => (p ?? '').toString().trim())
+                    .filter(Boolean);
+                out[role] = Array.from(new Set(cleaned));
+            });
+            return out;
+        }
+
+        function loadRolePermissionsFromLocal() {
+            try {
+                const raw = localStorage.getItem(ROLE_PERMISSIONS_LOCAL_KEY);
+                if (!raw) return;
+                const parsed = JSON.parse(raw);
+                const saved = normalizeRolePermissionsObject(parsed);
+                // aplica override + novos cargos
+                Object.keys(saved).forEach(role => {
+                    ROLE_PERMISSIONS[role] = saved[role];
+                });
+            } catch (e) {}
+        }
+
+        function saveRolePermissionsToLocal() {
+            try {
+                const snapshot = normalizeRolePermissionsObject(ROLE_PERMISSIONS);
+                localStorage.setItem(ROLE_PERMISSIONS_LOCAL_KEY, JSON.stringify(snapshot));
+            } catch (e) {}
+        }
+
+        function resetRolePermissionsToDefault() {
+            try {
+                // remove cargos não-default
+                Object.keys(ROLE_PERMISSIONS).forEach(role => {
+                    if (!Object.prototype.hasOwnProperty.call(ROLE_PERMISSIONS_DEFAULT, role)) {
+                        delete ROLE_PERMISSIONS[role];
+                    }
+                });
+                // restaura defaults
+                Object.keys(ROLE_PERMISSIONS_DEFAULT).forEach(role => {
+                    ROLE_PERMISSIONS[role] = Array.isArray(ROLE_PERMISSIONS_DEFAULT[role])
+                        ? [...ROLE_PERMISSIONS_DEFAULT[role]]
+                        : [];
+                });
+                saveRolePermissionsToLocal();
+            } catch (e) {}
+        }
+
+        // Aplica roles salvos logo ao carregar o script
+        loadRolePermissionsFromLocal();
 
         // Usuário atual (será definido no login)
         let currentUser = { role: 'Owner', roles: ['Owner'], name: 'Admin', id: 1 };
@@ -5648,97 +5889,30 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             if (!canShowDevMenu()) return;
 
             const li = document.createElement('li');
-            li.className = 'dev-menu-item';
+            li.className = '';
             li.id = 'devMenuItem';
 
             li.innerHTML = `
-                <a href="#" class="dev-menu-trigger">
-                    DEV <i class="fas fa-chevron-down" style="font-size: 11px;"></i>
-                </a>
-                <div class="dev-submenu">
-                    <a href="#" onclick="showSection('dev_backlog'); return false;">Backlog</a>
-                    <div style="height: 1px; background: var(--gray-border); margin: 6px 0;"></div>
-                    <a href="#" onclick="setIssueCategoryFilter('mapas'); return false;">MAPAS</a>
-                    <a href="#" onclick="setIssueCategoryFilter('bugs'); return false;">BUGS</a>
-                    <a href="#" onclick="setIssueCategoryFilter('carros'); return false;">CARROS</a>
-                    <a href="#" onclick="setIssueCategoryFilter('roupas'); return false;">ROUPAS</a>
-                    <a href="#" onclick="setIssueCategoryFilter('itens'); return false;">ITENS</a>
-                    <a href="#" onclick="setIssueCategoryFilter('coordenadas'); return false;">COORDENADAS</a>
-                    <a href="#" onclick="setIssueCategoryFilter('logs'); return false;">LOGS</a>
-                    <a href="#" onclick="setIssueCategoryFilter('atualizacoes'); return false;">ATUALIZAÇÕES</a>
-                </div>
+                <a href="#" onclick="showSection('dev_backlog'); return false;">Dev</a>
             `;
 
-            // Inserir DEV antes de Pendências (se existir)
-            const pendencias = Array.from(navMenu.querySelectorAll('a'))
-                .find(link => (link.getAttribute('onclick') || '').includes("pendencias"));
-            if (pendencias && pendencias.parentElement) {
-                pendencias.parentElement.before(li);
-            } else {
-                navMenu.appendChild(li);
-            }
-
-            // Toggle no clique (mobile/touch)
-            const trigger = li.querySelector('.dev-menu-trigger');
-            if (trigger) {
-                trigger.addEventListener('click', (event) => {
-                    event.preventDefault();
-                    li.classList.toggle('open');
-                    showSection('dev_backlog');
-                });
-            }
-        }
-
-        document.addEventListener('click', (event) => {
-            const devItem = document.getElementById('devMenuItem');
-            if (!devItem) return;
-            if (!devItem.contains(event.target)) {
-                devItem.classList.remove('open');
-            }
-        });
-
-        function toggleStatsMenu(forceOpen) {
-            const li = document.getElementById('statsMenuItem');
-            if (!li) return;
-            const devItem = document.getElementById('devMenuItem');
-            if (devItem) devItem.classList.remove('open');
-            if (typeof forceOpen === 'boolean') {
-                li.classList.toggle('open', forceOpen);
-                if (forceOpen) positionStatsSubmenu();
+            // Inserir DEV após Agenda (se existir); senão, antes de Pendências; senão, no final
+            const agendaLink = Array.from(navMenu.querySelectorAll('a'))
+                .find(link => (link.getAttribute('onclick') || '').includes("agenda"));
+            if (agendaLink && agendaLink.parentElement) {
+                agendaLink.parentElement.after(li);
                 return;
             }
-            li.classList.toggle('open');
-            if (li.classList.contains('open')) positionStatsSubmenu();
-        }
-
-        function positionStatsSubmenu() {
-            const trigger = document.getElementById('statsMenuTrigger');
-            const submenu = document.querySelector('#statsMenuItem .stats-submenu');
-            if (!trigger || !submenu) return;
-            const rect = trigger.getBoundingClientRect();
-            const left = Math.min(rect.left, window.innerWidth - 220);
-            const top = Math.min(rect.bottom + 8, window.innerHeight - 40);
-            submenu.style.left = `${Math.max(8, left)}px`;
-            submenu.style.top = `${Math.max(8, top)}px`;
-        }
-
-        window.addEventListener('resize', () => {
-            const li = document.getElementById('statsMenuItem');
-            if (li?.classList?.contains('open')) positionStatsSubmenu();
-        });
-
-        window.addEventListener('scroll', () => {
-            const li = document.getElementById('statsMenuItem');
-            if (li?.classList?.contains('open')) positionStatsSubmenu();
-        }, true);
-
-        document.addEventListener('click', (event) => {
-            const statsItem = document.getElementById('statsMenuItem');
-            if (!statsItem) return;
-            if (!statsItem.contains(event.target)) {
-                statsItem.classList.remove('open');
+            const pendenciasLink = Array.from(navMenu.querySelectorAll('a'))
+                .find(link => (link.getAttribute('onclick') || '').includes("pendencias"));
+            if (pendenciasLink && pendenciasLink.parentElement) {
+                pendenciasLink.parentElement.before(li);
+                return;
             }
-        });
+            navMenu.appendChild(li);
+        }
+
+        // Menus dropdown removidos do header (DEV/Estatísticas)
 
         // Função de compatibilidade para código existente que usa hasPermission
         function hasPermission(action) {
@@ -5866,6 +6040,9 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 case 'tarefas':
                     loadKanban();
                     break;
+                case 'estatisticas':
+                    loadRanking();
+                    break;
                 case 'ranking':
                     loadRanking();
                     break;
@@ -5923,6 +6100,9 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             
             // Obter nome do usuário
             const userName = currentUser?.name || currentUser?.displayName || 'Staff';
+
+            const systemSettings = getSystemSettingsObject();
+            const globalMessage = (systemSettings?.globalMessage || '').toString().trim();
             
             // Buscar atividades recentes (logs do sistema)
             const logsData = getData('txd_system_logs') || [];
@@ -5931,6 +6111,16 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 : [];
             
             const content = `
+                ${globalMessage ? `
+                <div style="background: rgba(0, 168, 255, 0.10); border: 1px solid rgba(0, 168, 255, 0.35); border-radius: 12px; padding: 16px 18px; margin-bottom: 26px;">
+                    <div style="display:flex; align-items:center; gap: 10px; color: var(--white-soft); font-weight: 800;">
+                        <i class="fas fa-bullhorn" style="color: var(--primary);"></i> Mensagem do sistema
+                    </div>
+                    <div style="margin-top: 8px; color: var(--gray-very-light); font-size: 14px; white-space: pre-wrap; line-height: 1.5;">
+                        ${escapeHtml(globalMessage)}
+                    </div>
+                </div>
+                ` : ''}
                 <!-- HERO -->
                 <div style="margin-bottom: 48px;">
                     <h1 id="sectionTitle" style="font-size: 36px; font-weight: 700; color: var(--white-soft); margin-bottom: 12px; line-height: 1.2;">
@@ -11645,13 +11835,19 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         // Variável para controlar aba ativa
         let activeSettingsTab = 'geral';
 
+        function isRomanovUser() {
+            const login = (currentUser?.login || '').toString().trim().toLowerCase();
+            const name = (currentUser?.name || currentUser?.displayName || '').toString().trim().toLowerCase();
+            return login === 'romanov' || name === 'romanov';
+        }
+
         function loadSettings() {
-            console.log('loadSettings() chamado');
+            debugLog('loadSettings() chamado');
             
             // Recarregar config do Discord
             discordConfig = getDiscordConfig();
             
-            console.log('loadSettings() - discordConfig:', discordConfig);
+            debugLog('loadSettings() - discordConfig:', discordConfig);
             if (!hasPermission('system.config')) {
                 const content = `
                     <h1 id="sectionTitle">Configurações do Sistema</h1>
@@ -11668,6 +11864,11 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 document.querySelector('.content-card').innerHTML = content;
                 return;
             }
+
+            // Se não for romanov, não deixar cair na aba Geral (que é exclusiva)
+            if (!isRomanovUser() && activeSettingsTab === 'geral') {
+                activeSettingsTab = 'discord';
+            }
             
             // Carregar aba padrão
             loadSettingsSection(activeSettingsTab);
@@ -11678,7 +11879,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             activeSettingsTab = tab;
             
             const tabs = [
-                { id: 'geral', name: 'Geral', icon: '⚙️' },
+                { id: 'geral', name: 'Geral', icon: '⚙️', romanovOnly: true },
                 { id: 'cargos', name: 'Cargos & Permissões', icon: '👥' },
                 { id: 'seguranca', name: 'Acesso & Segurança', icon: '🔐' },
                 { id: 'discord', name: 'Discord', icon: '🎮' },
@@ -11686,7 +11887,9 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                 { id: 'sistema', name: 'Sistema', icon: '🖥️' }
             ];
             
-            const tabsHTML = tabs.map(t => `
+            const tabsHTML = tabs
+                .filter(t => !(t.romanovOnly && !isRomanovUser()))
+                .map(t => `
                 <button class="settings-tab ${tab === t.id ? 'active' : ''}" 
                         onclick="loadSettingsSection('${t.id}')"
                         style="padding: 12px 20px; background: ${tab === t.id ? 'var(--gray-medium)' : 'transparent'}; 
@@ -11702,7 +11905,19 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             
             switch(tab) {
                 case 'geral':
-                    contentHTML = loadSettingsGeneral();
+                    if (!isRomanovUser()) {
+                        contentHTML = `
+                            <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border); text-align: center;">
+                                <i class="fas fa-lock" style="font-size: 48px; color: var(--danger); margin-bottom: 16px;"></i>
+                                <p style="color: var(--danger); font-size: 16px; margin-bottom: 8px;">Acesso Negado</p>
+                                <p style="color: var(--gray-light); font-size: 14px;">
+                                    A aba <strong>Geral</strong> é exclusiva do usuário <strong>romanov</strong>.
+                                </p>
+                            </div>
+                        `;
+                    } else {
+                        contentHTML = loadSettingsGeneral();
+                    }
                     break;
                 case 'cargos':
                     contentHTML = loadSettingsRoles();
@@ -11743,18 +11958,25 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         
         // 1. CONFIGURAÇÕES GERAIS
         function loadSettingsGeneral() {
-            const systemSettings = getData('txd_system_settings') || {
-                systemName: 'TXD Staff System',
-                maintenanceMode: false,
-                globalMessage: '',
-                logoUrl: ''
-            };
+            const systemSettings = getSystemSettingsObject();
             
             return `
                 <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border); margin-bottom: 24px;">
                     <h2 style="color: var(--white-soft); margin-bottom: 20px; font-size: 18px;">
                         <i class="fas fa-cog"></i> Configurações Gerais
                     </h2>
+
+                    <div style="background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 10px; padding: 16px; margin-bottom: 18px;">
+                        <div style="color: var(--white-soft); font-weight: 800; margin-bottom: 10px;">O que dá para configurar aqui</div>
+                        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; color: var(--gray-light); font-size: 13px; line-height: 1.45;">
+                            <div>• Nome do sistema (título do painel)</div>
+                            <div>• Logo (login + header)</div>
+                            <div>• Imagem de fundo (login)</div>
+                            <div>• Imagem de fundo (painel)</div>
+                            <div>• Mensagem global (banner no início)</div>
+                            <div>• Modo manutenção (bloqueio geral)</div>
+                        </div>
+                    </div>
                     
                     <div style="display: grid; gap: 20px;">
                         <!-- Nome do Sistema -->
@@ -11770,7 +11992,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                                    onchange="saveSystemSetting('systemName', this.value)">
                         </div>
                         
-                        <!-- Logo (placeholder) -->
+                        <!-- Logo -->
                         <div>
                             <label style="color: var(--gray-light); font-size: 14px; margin-bottom: 8px; display: block;">
                                 URL do Logo
@@ -11781,8 +12003,45 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                                    placeholder="https://exemplo.com/logo.png"
                                    style="width: 100%; padding: 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-size: 14px;"
                                    onchange="saveSystemSetting('logoUrl', this.value)">
+                            <div style="display:flex; align-items:center; gap: 12px; margin-top: 10px;">
+                                <div style="width: 54px; height: 54px; border-radius: 12px; background: var(--black-dark); border: 1px solid var(--gray-border); display:flex; align-items:center; justify-content:center; overflow:hidden;">
+                                    <img src="${escapeHtml(systemSettings.logoUrl || 'https://tdatgzjwcuatpqhfococ.supabase.co/storage/v1/object/public/logos/sem-fundo-txd.png')}" alt="Preview logo" style="max-width: 100%; max-height: 100%; object-fit: contain;">
+                                </div>
+                                <div style="color: var(--gray-text); font-size: 12px; line-height: 1.5;">
+                                    A logo será aplicada no login e no header assim que salvar.
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Background do Login -->
+                        <div>
+                            <label style="color: var(--gray-light); font-size: 14px; margin-bottom: 8px; display: block;">
+                                URL do Fundo (Login)
+                            </label>
+                            <input type="text"
+                                   id="loginBackgroundUrl"
+                                   value="${systemSettings.loginBackgroundUrl || ''}"
+                                   placeholder="https://exemplo.com/bg-login.jpg"
+                                   style="width: 100%; padding: 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-size: 14px;"
+                                   onchange="saveSystemSetting('loginBackgroundUrl', this.value)">
                             <p style="color: var(--gray-text); font-size: 12px; margin-top: 8px;">
-                                Upload de imagem será implementado em breve
+                                Dica: use uma imagem em alta resolução (JPG/PNG).
+                            </p>
+                        </div>
+
+                        <!-- Background do Painel -->
+                        <div>
+                            <label style="color: var(--gray-light); font-size: 14px; margin-bottom: 8px; display: block;">
+                                URL do Fundo (Painel)
+                            </label>
+                            <input type="text"
+                                   id="appBackgroundUrl"
+                                   value="${systemSettings.appBackgroundUrl || ''}"
+                                   placeholder="https://exemplo.com/bg-painel.jpg"
+                                   style="width: 100%; padding: 12px; background: var(--black-dark); border: 1px solid var(--gray-border); border-radius: 8px; color: var(--white-soft); font-size: 14px;"
+                                   onchange="saveSystemSetting('appBackgroundUrl', this.value)">
+                            <p style="color: var(--gray-text); font-size: 12px; margin-top: 8px;">
+                                Esta imagem aparece atrás de todas as abas do painel.
                             </p>
                         </div>
                         
@@ -11842,6 +12101,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             }
             
             const roles = Object.keys(ROLE_PERMISSIONS);
+            const canManage = currentUser?.role === 'Owner' || currentUser?.role === 'CEO' || hasPermission('permission.manage');
             
             return `
                 <div style="background: var(--gray-dark); border-radius: 12px; padding: 24px; border: 1px solid var(--gray-border); margin-bottom: 24px;">
@@ -11849,10 +12109,18 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                         <h2 style="color: var(--white-soft); font-size: 18px; margin: 0;">
                             <i class="fas fa-users-cog"></i> Gestão de Cargos e Permissões
                         </h2>
-                        <button class="btn btn-primary" onclick="openNewRoleModal()">
+                        <div style="display:flex; gap: 10px; flex-wrap: wrap;">
+                            <button class="btn btn-secondary" onclick="resetRolePermissionsToDefault(); loadSettingsSection('cargos');" style="width:auto; padding: 10px 14px;">
+                                <i class="fas fa-rotate-left"></i> Resetar Padrão
+                            </button>
+                            <button class="btn btn-primary" onclick="openNewRoleModal()">
                             <i class="fas fa-plus"></i> Novo Cargo
-                        </button>
+                            </button>
+                        </div>
                     </div>
+                    <p style="color: var(--gray-text); font-size: 12px; margin: 0 0 14px 0;">
+                        Dica: permissões são salvas no navegador (localStorage). Para multiusuário, depois podemos persistir no Supabase.
+                    </p>
                     
                         <div style="display: grid; gap: 16px;">
                         ${roles.map(role => {
@@ -12333,8 +12601,20 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         // Salvar configuração do sistema
         async function saveSystemSetting(key, value) {
             try {
-                const settings = getData('txd_system_settings') || {};
+                // Configurações gerais / branding são exclusivas do romanov
+                const romanovOnlyKeys = new Set(['systemName', 'maintenanceMode', 'globalMessage', 'logoUrl', 'appBackgroundUrl', 'loginBackgroundUrl']);
+                if (romanovOnlyKeys.has(String(key || '')) && !isRomanovUser()) {
+                    alert('Apenas o usuário romanov pode alterar as configurações gerais.');
+                    return false;
+                }
+                const settings = getSystemSettingsObject();
                 settings[key] = value;
+                // Salvar local (sempre) para funcionar mesmo sem tabela no Supabase
+                dataCache['txd_system_settings'] = settings;
+                writeSystemSettingsLocal(settings);
+                applyBrandingFromSystemSettings(settings);
+
+                // Persistir no Supabase (best-effort)
                 await saveData('txd_system_settings', settings);
                 
                 // Log da ação
@@ -12360,6 +12640,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             }
             
             ROLE_PERMISSIONS[roleName] = permissions;
+            saveRolePermissionsToLocal();
             
             logSystemAction('Cargo criado', 'Permissões', { role: roleName, permissions, level });
             
@@ -12380,6 +12661,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             }
             
             ROLE_PERMISSIONS[role] = permissions;
+            saveRolePermissionsToLocal();
             
             logSystemAction('Permissões atualizadas', 'Permissões', { role, permissions });
             
@@ -12421,22 +12703,37 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         
         // Funções auxiliares para as abas
         function saveAllGeneralSettings() {
+            if (!isRomanovUser()) {
+                alert('Apenas o usuário romanov pode salvar as configurações gerais.');
+                return;
+            }
             const systemName = document.getElementById('systemName')?.value;
             const logoUrl = document.getElementById('logoUrl')?.value;
             const globalMessage = document.getElementById('globalMessage')?.value;
+            const loginBackgroundUrl = document.getElementById('loginBackgroundUrl')?.value;
+            const appBackgroundUrl = document.getElementById('appBackgroundUrl')?.value;
             
             if (systemName) saveSystemSetting('systemName', systemName);
             if (logoUrl !== undefined) saveSystemSetting('logoUrl', logoUrl);
             if (globalMessage !== undefined) saveSystemSetting('globalMessage', globalMessage);
+            if (loginBackgroundUrl !== undefined) saveSystemSetting('loginBackgroundUrl', loginBackgroundUrl);
+            if (appBackgroundUrl !== undefined) saveSystemSetting('appBackgroundUrl', appBackgroundUrl);
             
             alert('Configurações gerais salvas com sucesso!');
-            logSystemAction('Configurações gerais atualizadas', 'Sistema', { systemName, logoUrl });
+            logSystemAction('Configurações gerais atualizadas', 'Sistema', { systemName, logoUrl, loginBackgroundUrl, appBackgroundUrl });
         }
         
         function toggleMaintenanceMode() {
-            const settings = getData('txd_system_settings') || {};
+            if (!isRomanovUser()) {
+                alert('Apenas o usuário romanov pode alterar o modo manutenção.');
+                return;
+            }
+            const settings = getSystemSettingsObject();
             settings.maintenanceMode = !settings.maintenanceMode;
-            saveData('txd_system_settings', settings);
+            dataCache['txd_system_settings'] = settings;
+            writeSystemSettingsLocal(settings);
+            applyBrandingFromSystemSettings(settings);
+            saveData('txd_system_settings', settings).catch(() => {});
             loadSettingsSection('geral');
             logSystemAction('Modo manutenção alterado', 'Sistema', { maintenanceMode: settings.maintenanceMode });
         }
@@ -12817,19 +13114,153 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         }
         
         function editRole(role) {
-            alert('Funcionalidade de edição de cargo será implementada em breve.');
+            const r = String(role || '').trim();
+            if (!r) return;
+            if (r === 'Owner' || r === 'CEO') {
+                alert('Não é possível editar Owner/CEO.');
+                return;
+            }
+            openRoleModal({ mode: 'edit', roleName: r });
         }
         
         function deleteRole(role) {
-            if (confirm(`Tem certeza que deseja excluir o cargo "${role}"?`)) {
-                delete ROLE_PERMISSIONS[role];
+            const r = String(role || '').trim();
+            if (!r) return;
+            if (r === 'Owner' || r === 'CEO') {
+                alert('Não é possível excluir Owner/CEO.');
+                return;
+            }
+            if (confirm(`Tem certeza que deseja excluir o cargo "${r}"?`)) {
+                delete ROLE_PERMISSIONS[r];
+                saveRolePermissionsToLocal();
                 loadSettingsSection('cargos');
-                logSystemAction('Cargo excluído', 'Permissões', { role });
+                logSystemAction('Cargo excluído', 'Permissões', { role: r });
             }
         }
         
         function openNewRoleModal() {
-            alert('Modal de criação de cargo será implementado em breve.');
+            openRoleModal({ mode: 'create' });
+        }
+
+        const PERMISSION_CATALOG = [
+            { key: 'dashboard', label: 'Dashboard', desc: 'Acesso a tarefas/estatísticas gerais.' },
+            { key: 'pendencias', label: 'Pendências (completo)', desc: 'Criar/visualizar/gerenciar pendências.' },
+            { key: 'pendencias_basico', label: 'Pendências (básico)', desc: 'Criar e acompanhar suas pendências.' },
+            { key: 'moderacao', label: 'Moderação', desc: 'Advertências e recursos de moderação.' },
+            { key: 'comandos', label: 'Comandos', desc: 'Gerenciar catálogo de comandos.' },
+            { key: 'area', label: 'Áreas', desc: 'Gerenciar áreas de responsabilidade.' },
+            { key: 'staff', label: 'Controle de staff', desc: 'Gerenciar membros/contas da staff.' },
+            { key: 'staff_area', label: 'Staff (área)', desc: 'Acesso parcial para área.' },
+            { key: 'relatorios', label: 'Relatórios', desc: 'Acesso à aba de relatórios.' },
+            { key: 'sistema', label: 'Sistema/Config', desc: 'Acesso às configurações do sistema.' },
+            { key: 'dev_area', label: 'Área DEV', desc: 'Acesso à aba DEV (backlog).' },
+            { key: 'chat', label: 'Chat', desc: 'Acesso ao chat interno (se habilitado).' }
+        ];
+
+        function renderPermissionsGrid(selected) {
+            const set = new Set((Array.isArray(selected) ? selected : []).map(p => String(p).trim()).filter(Boolean));
+            const hasAll = set.has('*');
+            const grid = document.getElementById('permissionsGrid');
+            if (!grid) return;
+            grid.innerHTML = PERMISSION_CATALOG.map(p => {
+                const checked = hasAll ? false : set.has(p.key);
+                const disabled = hasAll ? 'disabled' : '';
+                return `
+                    <label style="display:flex; gap: 10px; align-items:flex-start; background: var(--gray-dark); border: 1px solid var(--gray-border); border-radius: 12px; padding: 12px; cursor: pointer;">
+                        <input type="checkbox" class="perm-checkbox" value="${escapeHtml(p.key)}" ${checked ? 'checked' : ''} ${disabled} style="width: 18px; height: 18px; margin-top: 2px;">
+                        <div style="flex:1;">
+                            <div style="color: var(--white-soft); font-weight: 800; font-size: 13px;">${escapeHtml(p.label)} <span style="color: var(--gray-text); font-weight: 700;">(${escapeHtml(p.key)})</span></div>
+                            <div style="color: var(--gray-light); font-size: 12px; margin-top: 4px; line-height: 1.4;">${escapeHtml(p.desc)}</div>
+                        </div>
+                    </label>
+                `;
+            }).join('');
+
+            const toggle = document.getElementById('permAllToggle');
+            if (toggle) toggle.checked = hasAll;
+        }
+
+        function toggleAllPermissions(checked) {
+            const grid = document.getElementById('permissionsGrid');
+            if (!grid) return;
+            grid.querySelectorAll('input.perm-checkbox').forEach(cb => {
+                cb.disabled = !!checked;
+                if (checked) cb.checked = false;
+            });
+        }
+
+        function openRoleModal({ mode, roleName } = {}) {
+            const m = String(mode || 'create');
+            const modal = document.getElementById('roleModal');
+            if (!modal) return;
+            const title = document.getElementById('roleModalTitle');
+            const modeEl = document.getElementById('roleModalMode');
+            const origEl = document.getElementById('roleModalOriginalName');
+            const nameInput = document.getElementById('roleNameInput');
+
+            const editing = m === 'edit';
+            const r = editing ? String(roleName || '').trim() : '';
+            const perms = editing ? (getUserPermissions(r) || []) : [];
+
+            if (title) title.textContent = editing ? `Editar Cargo: ${r}` : 'Novo Cargo';
+            if (modeEl) modeEl.value = editing ? 'edit' : 'create';
+            if (origEl) origEl.value = r;
+            if (nameInput) {
+                nameInput.value = editing ? r : '';
+                nameInput.disabled = editing; // renomear cargo pode quebrar dados existentes
+            }
+
+            renderPermissionsGrid(perms);
+            modal.classList.add('active');
+        }
+
+        function collectSelectedPermissions() {
+            const all = document.getElementById('permAllToggle')?.checked === true;
+            if (all) return ['*'];
+            const grid = document.getElementById('permissionsGrid');
+            if (!grid) return [];
+            const perms = Array.from(grid.querySelectorAll('input.perm-checkbox'))
+                .filter(cb => cb && cb.checked)
+                .map(cb => cb.value)
+                .map(v => String(v).trim())
+                .filter(Boolean);
+            // manter dev_area opcional, e remover duplicados
+            return Array.from(new Set(perms));
+        }
+
+        function saveRoleFromModal(event) {
+            event.preventDefault();
+            if (!hasPermission('permission.manage') && currentUser.role !== 'Owner' && currentUser.role !== 'CEO') {
+                alert('Sem permissão para alterar cargos.');
+                return;
+            }
+            const mode = document.getElementById('roleModalMode')?.value || 'create';
+            const original = document.getElementById('roleModalOriginalName')?.value || '';
+            const nameInput = document.getElementById('roleNameInput');
+            const roleName = (nameInput?.value || '').toString().trim();
+            const perms = collectSelectedPermissions();
+
+            if (!roleName) {
+                alert('Informe o nome do cargo.');
+                return;
+            }
+            if (roleName === 'Owner' || roleName === 'CEO') {
+                alert('Owner/CEO não podem ser alterados.');
+                return;
+            }
+            if (mode === 'create') {
+                if (ROLE_PERMISSIONS[roleName]) {
+                    alert('Este cargo já existe.');
+                    return;
+                }
+                createRole(roleName, perms);
+            } else {
+                updateRolePermissions(original || roleName, perms);
+            }
+
+            saveRolePermissionsToLocal();
+            closeModal('roleModal');
+            loadSettingsSection('cargos');
         }
 
         // ========== FUNÇÕES DE INTEGRAÇÃO DISCORD ==========
@@ -16048,6 +16479,9 @@ processDiscordCommand() diretamente.
 
                 // Inicializar inbox de notificações (se existir no Supabase)
                 initializeNotificationsSystem().catch(() => {});
+
+                // Aplicar branding/configurações gerais (logo, fundos, título)
+                try { applyBrandingFromSystemSettings(getSystemSettingsObject()); } catch (e) {}
             } catch (error) {
                 console.error('Erro ao atualizar dados:', error);
             }
@@ -18969,6 +19403,7 @@ processDiscordCommand() diretamente.
             'tarefas': ['txd_kanban', 'txd_staff'],
             'ranking': ['txd_kanban', 'txd_pendencies', 'txd_staff'],
             'conquistas': ['txd_kanban', 'txd_pendencies', 'txd_staff'],
+            'estatisticas': ['txd_kanban', 'txd_pendencies', 'txd_staff', 'txd_chat_messages'],
             'controle': ['txd_staff', 'txd_registration_requests'],
             'comandos': ['txd_commands', 'txd_favorite_commands', 'txd_command_usage'],
             'agenda': ['txd_events'],
