@@ -4157,11 +4157,85 @@
                         
                     case 'txd_events':
                         if (Array.isArray(data)) {
-                            const convertedData = toSnakeCase(data);
-                            const { error } = await supabaseClient
+                            const isMissingColumn = (err, col) => {
+                                const msg = (err?.message || '').toString().toLowerCase();
+                                const c = String(col || '').toLowerCase();
+                                return c && msg.includes(c) && (msg.includes('could not find') || msg.includes('does not exist') || msg.includes('schema cache'));
+                            };
+
+                            const normalizeTimeForDb = (value) => {
+                                const v = (value || '').toString().trim();
+                                if (!v) return null;
+                                if (/^\d{2}:\d{2}:\d{2}$/.test(v)) return v;
+                                if (/^\d{2}:\d{2}$/.test(v)) return `${v}:00`;
+                                return null;
+                            };
+
+                            const v2Payload = data.map(e => {
+                                const idRaw = e?.id;
+                                const id = idRaw === null || idRaw === undefined || idRaw === '' ? undefined : Number(idRaw);
+                                const title = (e?.title || '').toString();
+                                const description = e?.description === undefined ? undefined : (e?.description ?? null);
+                                const location = e?.location === undefined ? undefined : (e?.location ?? null);
+                                const createdBy = (e?.createdBy || e?.created_by || '').toString().trim();
+
+                                const eventDate = getEventDateString(e) || null;
+                                const eventTime = normalizeTimeForDb(getEventTimeString(e));
+
+                                const row = {
+                                    id: Number.isFinite(id) ? id : undefined,
+                                    title,
+                                    description,
+                                    event_date: eventDate || null,
+                                    event_time: eventTime,
+                                    location,
+                                    created_by: createdBy || null,
+                                    created_at: e?.createdAt ? e.createdAt : undefined
+                                };
+
+                                Object.keys(row).forEach(k => {
+                                    if (row[k] === undefined) delete row[k];
+                                });
+                                return row;
+                            });
+
+                            let { error } = await supabaseClient
                                 .from('events')
-                                .upsert(convertedData, { onConflict: 'id' });
+                                .upsert(v2Payload, { onConflict: 'id' });
+
+                            if (error && (isMissingColumn(error, 'event_date') || isMissingColumn(error, 'event_time'))) {
+                                console.warn('[events] Schema parece legacy (sem event_date/event_time). Tentando salvar com datetime/type.', error);
+
+                                const legacyPayload = data.map(e => {
+                                    const idRaw = e?.id;
+                                    const id = idRaw === null || idRaw === undefined || idRaw === '' ? undefined : Number(idRaw);
+                                    const row = {
+                                        id: Number.isFinite(id) ? id : undefined,
+                                        title: (e?.title || '').toString(),
+                                        description: e?.description === undefined ? undefined : (e?.description ?? null),
+                                        type: e?.type ? String(e.type) : undefined,
+                                        datetime: e?.datetime ? String(e.datetime) : undefined,
+                                        location: e?.location === undefined ? undefined : (e?.location ?? null),
+                                        created_by: (e?.createdBy || e?.created_by || '').toString().trim() || null,
+                                        created_at: e?.createdAt ? e.createdAt : undefined
+                                    };
+                                    Object.keys(row).forEach(k => {
+                                        if (row[k] === undefined) delete row[k];
+                                    });
+                                    return row;
+                                });
+
+                                const retry = await supabaseClient
+                                    .from('events')
+                                    .upsert(legacyPayload, { onConflict: 'id' });
+                                error = retry.error;
+                            }
+
                             if (error) throw error;
+
+                            // Atualizar cache após salvar
+                            dataCache['txd_events'] = data;
+                            cacheTimestamps['txd_events'] = Date.now();
                         }
                         break;
                         
@@ -7928,7 +8002,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             const pastEvents = [];
             
             eventsData.forEach(event => {
-                const eventDate = new Date(event.eventDate || event.event_date || event.date || event.datetime || 0);
+                const eventDate = getEventDateObject(event);
                 eventDate.setHours(0, 0, 0, 0);
                 if (eventDate >= today) {
                     upcomingEvents.push(event);
@@ -7938,14 +8012,14 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             });
             
             upcomingEvents.sort((a, b) => {
-                const dateA = new Date(a.eventDate || a.event_date || a.date || a.datetime || 0);
-                const dateB = new Date(b.eventDate || b.event_date || b.date || b.datetime || 0);
+                const dateA = getEventDateObject(a);
+                const dateB = getEventDateObject(b);
                 return dateA - dateB;
             });
             
             pastEvents.sort((a, b) => {
-                const dateA = new Date(a.eventDate || a.event_date || a.date || a.datetime || 0);
-                const dateB = new Date(b.eventDate || b.event_date || b.date || b.datetime || 0);
+                const dateA = getEventDateObject(a);
+                const dateB = getEventDateObject(b);
                 return dateB - dateA;
             });
             
@@ -7953,7 +8027,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             const nextWeek = new Date();
             nextWeek.setDate(nextWeek.getDate() + 7);
             const upcomingWeekEvents = upcomingEvents.filter(event => {
-                const eventDate = new Date(event.eventDate || event.event_date || event.date || event.datetime || 0);
+                const eventDate = getEventDateObject(event);
                 return eventDate <= nextWeek;
             });
             
@@ -7968,8 +8042,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                     </h2>
                     <div style="display: grid; gap: 12px;">
                         ${upcomingWeekEvents.map(event => {
-                            const eventDate = new Date(event.eventDate || event.event_date || event.date || event.datetime || 0);
-                            const eventTime = event.eventTime || event.event_time || event.time || '18:00';
+                            const eventDate = getEventDateObject(event);
+                            const eventTime = getEventTimeString(event) || '18:00';
                             const daysUntil = Math.ceil((eventDate - today) / (1000 * 60 * 60 * 24));
                             const isToday = daysUntil === 0;
                             const isTomorrow = daysUntil === 1;
@@ -8009,8 +8083,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                     </h2>
                     <div style="display: grid; gap: 16px;">
                         ${upcomingEvents.map(event => {
-                            const eventDate = new Date(event.eventDate || event.event_date || event.date || event.datetime || 0);
-                            const eventTime = event.eventTime || event.event_time || event.time || '18:00';
+                            const eventDate = getEventDateObject(event);
+                            const eventTime = getEventTimeString(event) || '18:00';
                             const eventDateTime = new Date(eventDate);
                             if (eventTime) {
                                 const [hours, minutes] = eventTime.split(':');
@@ -8044,8 +8118,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                         </summary>
                         <div style="display: grid; gap: 16px; margin-top: 16px;">
                             ${pastEvents.slice(0, 10).map(event => {
-                                const eventDate = new Date(event.eventDate || event.event_date || event.date || event.datetime || 0);
-                                const eventTime = event.eventTime || event.event_time || event.time || '18:00';
+                                const eventDate = getEventDateObject(event);
+                                const eventTime = getEventTimeString(event) || '18:00';
                                 return `<div style="padding: 16px; background: var(--gray-darker); border-radius: 8px; border: 1px solid var(--gray-border); opacity: 0.7;">
                                     <div style="display: flex; justify-content: space-between; align-items: start; flex-wrap: wrap; gap: 12px;">
                                         <div style="flex: 1;">
@@ -8085,8 +8159,8 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             const monthNames = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
             const eventsByDay = {};
             events.forEach(event => {
-                const eventDate = new Date(event.eventDate || event.event_date || event.date || event.datetime || 0);
-                if (eventDate.getMonth() === month && eventDate.getFullYear() === year) {
+                const eventDate = getEventDateObject(event);
+                if (!Number.isNaN(eventDate.getTime()) && eventDate.getMonth() === month && eventDate.getFullYear() === year) {
                     const day = eventDate.getDate();
                     if (!eventsByDay[day]) eventsByDay[day] = [];
                     eventsByDay[day].push(event);
@@ -8105,11 +8179,74 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             for (let day = 1; day <= daysInMonth; day++) {
                 const date = new Date(year, month, day);
                 const isToday = date.toDateString() === today.toDateString();
-                const hasEvents = eventsByDay[day] && eventsByDay[day].length > 0;
-                const eventCount = hasEvents ? eventsByDay[day].length : 0;
-                calendarHTML += `<div style="aspect-ratio: 1; background: ${isToday ? 'var(--primary)' : hasEvents ? 'var(--gray-darker)' : 'var(--black-dark)'}; border-radius: 8px; border: 2px solid ${isToday ? 'var(--success)' : 'var(--gray-border)'}; padding: 8px; cursor: ${hasEvents ? 'pointer' : 'default'}; position: relative; transition: all 0.2s ease;" ${hasEvents ? `onclick="showDayEvents(${day}, ${month}, ${year})" onmouseenter="this.style.transform='scale(1.05)'; this.style.borderColor='var(--primary)'" onmouseleave="this.style.transform='scale(1)'; this.style.borderColor='${isToday ? 'var(--success)' : 'var(--gray-border)'}'"` : ''}>
+                const dayEvents = Array.isArray(eventsByDay[day]) ? eventsByDay[day] : [];
+                const hasEvents = dayEvents.length > 0;
+                const eventCount = dayEvents.length;
+                const borderColor = isToday ? 'var(--success)' : hasEvents ? 'rgba(0,168,255,0.75)' : 'var(--gray-border)';
+                const background = isToday
+                    ? 'var(--primary)'
+                    : hasEvents
+                        ? 'linear-gradient(180deg, rgba(0,168,255,0.18), var(--gray-darker))'
+                        : 'var(--black-dark)';
+                const shadow = hasEvents
+                    ? '0 0 0 1px rgba(0,168,255,0.18), 0 10px 18px rgba(0,0,0,0.24)'
+                    : 'none';
+                const tooltip = hasEvents ? (() => {
+                    const preview = dayEvents.slice(0, 4).map(e => {
+                        const title = (e.title || 'Sem título').toString();
+                        const time = (getEventTimeString(e) || '').toString().trim();
+                        return time ? `${title} (${time})` : title;
+                    });
+                    return `Eventos (${eventCount}): ${preview.join(' • ')}${eventCount > 4 ? ` • +${eventCount - 4}...` : ''}`;
+                })() : '';
+                const titleAttr = hasEvents ? `title="${escapeHtml(tooltip)}"` : '';
+                const labelBg = isToday ? 'rgba(0,0,0,0.22)' : 'rgba(0,168,255,0.14)';
+                const labelBorder = isToday ? 'rgba(255,255,255,0.22)' : 'rgba(0,168,255,0.42)';
+                const timeBadgeBg = isToday ? 'rgba(0,0,0,0.22)' : 'rgba(0,168,255,0.22)';
+                const timeBadgeBorder = isToday ? 'rgba(255,255,255,0.22)' : 'rgba(0,168,255,0.55)';
+                const dayEventsSorted = hasEvents
+                    ? dayEvents.slice().sort((a, b) => {
+                        const ta = (getEventTimeString(a) || '99:99').toString().slice(0, 5);
+                        const tb = (getEventTimeString(b) || '99:99').toString().slice(0, 5);
+                        if (ta !== tb) return ta.localeCompare(tb, 'pt-BR');
+                        return (a.title || '').toString().localeCompare((b.title || '').toString(), 'pt-BR');
+                    })
+                    : [];
+
+                calendarHTML += `<div ${titleAttr} style="aspect-ratio: 1; background: ${background}; border-radius: 8px; border: 2px solid ${borderColor}; box-shadow: ${shadow}; padding: 8px; cursor: ${hasEvents ? 'pointer' : 'default'}; position: relative; transition: all 0.2s ease;" ${hasEvents ? `onclick="showDayEvents(${day}, ${month}, ${year})" onmouseenter="this.style.transform='scale(1.05)'; this.style.borderColor='var(--primary)'; this.style.boxShadow='0 0 0 1px rgba(0,168,255,0.30), 0 12px 22px rgba(0,0,0,0.32)'" onmouseleave="this.style.transform='scale(1)'; this.style.borderColor='${borderColor}'; this.style.boxShadow='${shadow}'"` : ''}>
                     <div style="font-size: 14px; font-weight: ${isToday ? '700' : '600'}; color: ${isToday ? 'white' : 'var(--white-soft)'}; margin-bottom: 4px;">${day}</div>
-                    ${hasEvents ? `<div style="display: flex; flex-wrap: wrap; gap: 2px; margin-top: 4px;">${eventsByDay[day].slice(0, 3).map(() => `<div style="width: 6px; height: 6px; border-radius: 50%; background: var(--primary);"></div>`).join('')}${eventCount > 3 ? `<div style="font-size: 8px; color: var(--gray-text);">+${eventCount - 3}</div>` : ''}</div>` : ''}
+                    ${hasEvents ? `
+                        <div style="position: absolute; top: 6px; right: 6px; background: rgba(0, 168, 255, 0.22); border: 1px solid rgba(0, 168, 255, 0.55); color: ${isToday ? 'white' : 'var(--white-soft)'}; font-size: 11px; font-weight: 800; border-radius: 999px; padding: 2px 6px; line-height: 1;">
+                            ${eventCount}
+                        </div>
+                        <div style="margin-top: 10px; padding-right: 34px; display: flex; flex-direction: column; gap: 6px;">
+                            ${dayEventsSorted.slice(0, 3).map(e => {
+                                const title = escapeHtml((e.title || 'Evento').toString());
+                                const time = (getEventTimeString(e) || '').toString().trim().slice(0, 5);
+                                const timeLabel = time ? escapeHtml(time) : '—';
+                                return `
+                                    <div style="display: flex; align-items: center; gap: 8px; background: ${labelBg}; border: 1px solid ${labelBorder}; border-radius: 10px; padding: 6px 8px; overflow: hidden; box-shadow: 0 0 0 1px rgba(0,168,255,0.08), 0 10px 16px rgba(0,0,0,0.18);">
+                                        <div style="flex: 0 0 auto; background: ${timeBadgeBg}; border: 1px solid ${timeBadgeBorder}; color: ${isToday ? 'white' : 'var(--white-soft)'}; font-size: 10px; font-weight: 900; border-radius: 999px; padding: 2px 6px; line-height: 1;">
+                                            ${timeLabel}
+                                        </div>
+                                        <div style="flex: 1; min-width: 0; font-size: 11px; font-weight: 900; color: ${isToday ? 'white' : 'var(--white-soft)'}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                                            ${title}
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                            ${eventCount > 3 ? `<div style="font-size: 10px; font-weight: 900; color: ${isToday ? 'rgba(255,255,255,0.92)' : 'var(--gray-very-light)'}; opacity: 0.9; padding-left: 2px;">+${eventCount - 3} mais</div>` : ''}
+                        </div>
+                        <div style="position: absolute; left: 8px; right: 8px; bottom: 6px; height: 4px; border-radius: 999px; background: var(--primary); opacity: 0.95;"></div>
+                        <div style="display: flex; flex-wrap: wrap; gap: 3px; margin-top: 6px;">
+                            ${dayEvents.slice(0, 3).map(() => `<div style="width: 8px; height: 8px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 1px rgba(0,168,255,0.35);"></div>`).join('')}
+                            ${eventCount > 3 ? `<div style="font-size: 10px; color: var(--gray-very-light); font-weight: 800;">+${eventCount - 3}</div>` : ''}
+                        </div>
+                    ` : `
+                        <div style="position: absolute; left: 8px; right: 8px; bottom: 10px; text-align: center; font-size: 10px; font-weight: 900; letter-spacing: 1px; text-transform: uppercase; color: ${isToday ? 'rgba(255,255,255,0.92)' : 'var(--gray-text)'}; opacity: ${isToday ? '0.95' : '0.75'};">
+                            ${isToday ? 'HOJE' : 'SEM EVENTO'}
+                        </div>
+                    `}
                 </div>`;
             }
             calendarHTML += `</div></div>`;
@@ -8119,12 +8256,12 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
         function showDayEvents(day, month, year) {
             const date = new Date(year, month, day);
             const eventsOnDay = eventsData.filter(event => {
-                const eventDate = new Date(event.eventDate || event.event_date || event.date || event.datetime || 0);
+                const eventDate = getEventDateObject(event);
                 return eventDate.getDate() === day && eventDate.getMonth() === month && eventDate.getFullYear() === year;
             });
             if (eventsOnDay.length === 0) return;
             const eventsList = eventsOnDay.map(event => {
-                const eventTime = event.eventTime || event.event_time || event.time || '18:00';
+                const eventTime = getEventTimeString(event) || '18:00';
                 return `• ${event.title || 'Sem título'} - ${eventTime}`;
             }).join('\n');
             alert(`Eventos em ${date.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}:\n\n${eventsList}`);
@@ -14032,14 +14169,51 @@ processDiscordCommand() diretamente.
             if (!Array.isArray(eventsData)) eventsData = [];
             const event = eventsData.find(e => e.id === id);
             if (event) {
+                const existingDate = (event.eventDate || event.event_date || '').toString();
+                const existingTime = (event.eventTime || event.event_time || '').toString();
+                const fallbackDateTime = existingDate
+                    ? `${existingDate}T${(existingTime || '18:00').toString().trim().slice(0, 5)}`
+                    : '';
                 document.getElementById('eventId').value = event.id;
                 document.getElementById('eventModalTitle').textContent = 'Editar Evento';
                 document.getElementById('eventType').value = event.type;
                 document.getElementById('eventTitle').value = event.title;
-                document.getElementById('eventDateTime').value = event.datetime;
+                document.getElementById('eventDateTime').value = event.datetime || fallbackDateTime;
                 document.getElementById('eventDescription').value = event.description || '';
                 document.getElementById('eventModal').classList.add('active');
             }
+        }
+
+        function extractDateTimeParts(datetimeLocal) {
+            const raw = (datetimeLocal || '').toString().trim();
+            if (!raw || !raw.includes('T')) return { date: '', time: '' };
+            const [datePart, timePartRaw] = raw.split('T');
+            const timePart = (timePartRaw || '').toString().trim().slice(0, 5);
+            return { date: datePart || '', time: timePart || '' };
+        }
+
+        function getEventDateString(evt) {
+            const v = (evt?.eventDate || evt?.event_date || evt?.date || '').toString().trim();
+            if (v) return v;
+            const dt = (evt?.datetime || '').toString().trim();
+            return extractDateTimeParts(dt).date || '';
+        }
+
+        function getEventDateObject(evt) {
+            const dateStr = getEventDateString(evt);
+            if (dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+                return new Date(`${dateStr}T00:00`);
+            }
+            const dt = (evt?.datetime || '').toString().trim();
+            if (dt) return new Date(dt);
+            return new Date(0);
+        }
+
+        function getEventTimeString(evt) {
+            const v = (evt?.eventTime || evt?.event_time || evt?.time || '').toString().trim();
+            if (v) return v.slice(0, 5);
+            const dt = (evt?.datetime || '').toString().trim();
+            return extractDateTimeParts(dt).time || '';
         }
 
         function saveEvent(event) {
@@ -14051,12 +14225,16 @@ processDiscordCommand() diretamente.
 
             // Garantir que eventsData é um array
             if (!Array.isArray(eventsData)) eventsData = [];
+            const dateTimeValue = document.getElementById('eventDateTime').value;
+            const { date: eventDate, time: eventTime } = extractDateTimeParts(dateTimeValue);
             
             const eventData = {
                 id: document.getElementById('eventId').value || Date.now(),
                 type: document.getElementById('eventType').value,
                 title: document.getElementById('eventTitle').value,
-                datetime: document.getElementById('eventDateTime').value,
+                datetime: dateTimeValue,
+                eventDate: eventDate,
+                eventTime: eventTime,
                 description: document.getElementById('eventDescription').value,
                 createdAt: new Date().toISOString()
             };
@@ -14070,6 +14248,10 @@ processDiscordCommand() diretamente.
                 eventsData.push(eventData);
             }
 
+            // Atualizar cache imediatamente (evita UI "perder" eventos por stale-while-revalidate)
+            dataCache['txd_events'] = eventsData;
+            cacheTimestamps['txd_events'] = Date.now();
+
             saveData('txd_events', eventsData);
             
             // Notificar Discord
@@ -14077,14 +14259,14 @@ processDiscordCommand() diretamente.
                 // Evento editado
                 sendDiscordNotification('events', '📝 Evento Atualizado', `O evento "${eventData.title}" foi atualizado`, [
                     { name: '📅 Data', value: new Date(eventData.datetime).toLocaleDateString('pt-BR'), inline: true },
-                    { name: '🕒 Hora', value: new Date(eventData.datetime).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'}), inline: true },
+                    { name: '🕒 Hora', value: (getEventTimeString(eventData) || new Date(eventData.datetime).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'})), inline: true },
                     { name: '📝 Tipo', value: eventData.type === 'event' ? 'Evento' : eventData.type === 'meeting' ? 'Reunião' : 'Treinamento', inline: true }
                 ]);
             } else {
                 // Evento novo
                 sendDiscordNotification('events', '🎉 Novo Evento Criado', `"${eventData.title}" foi agendado!`, [
                     { name: '📅 Data', value: new Date(eventData.datetime).toLocaleDateString('pt-BR'), inline: true },
-                    { name: '🕒 Hora', value: new Date(eventData.datetime).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'}), inline: true },
+                    { name: '🕒 Hora', value: (getEventTimeString(eventData) || new Date(eventData.datetime).toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'})), inline: true },
                     { name: '📝 Tipo', value: eventData.type === 'event' ? 'Evento' : eventData.type === 'meeting' ? 'Reunião' : 'Treinamento', inline: true },
                     { name: '👤 Criado por', value: currentUser.displayName, inline: true }
                 ]);
