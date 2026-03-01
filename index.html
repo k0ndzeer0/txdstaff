@@ -9449,6 +9449,12 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
             };
             const statusColor = statusColors[normalizedStatus] || 'var(--warning)';
             const createdAt = new Date(pendency.createdAt || pendency.created_at || 0);
+            const updatedAt = new Date(pendency.updatedAt || pendency.updated_at || createdAt);
+            const meta = (pendency.attachments && typeof pendency.attachments === 'object')
+                ? (pendency.attachments._meta || pendency.attachments.meta || null)
+                : null;
+            const lastEditedAt = meta?.lastEditedAt || meta?.last_edited_at || null;
+            const wasEdited = !!lastEditedAt || ((updatedAt && createdAt) && (updatedAt.getTime() - createdAt.getTime()) > 1000);
             const dueDate = pendency.dueDate || pendency.due_date;
             const isOverdue = dueDate && new Date(dueDate) < new Date() && (normalizedStatus === 'pending' || normalizedStatus === 'in_progress' || normalizedStatus === 'approved');
             return `
@@ -9459,6 +9465,7 @@ Aguarde a aprovação de um administrador. Você receberá uma notificação qua
                                 <h3 style="color: var(--white-soft); font-size: 18px; margin: 0;">#${pendency.id} - ${pendency.title || 'Sem título'}</h3>
                                 <span class="badge" style="background: ${priorityInfo.bg}; color: ${priorityInfo.text}; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;">${priorityInfo.label}</span>
                                 <span class="badge" style="background: ${statusColor}; color: white; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;">${statusLabel}</span>
+                                ${wasEdited ? '<span class="badge" style="background: rgba(255, 170, 0, 0.18); color: var(--warning); border: 1px solid rgba(255, 170, 0, 0.35); padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 800;"><i class=\"fas fa-pen\" style=\"margin-right: 6px;\"></i>Editada</span>' : ''}
                                 ${financialOnly ? '<span class="badge" style="background: var(--danger); color: white; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;">Somente C-Level</span>' : ''}
                                 ${isDevDestination ? '<span class="badge" style="background: var(--primary); color: white; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;">DEV</span>' : ''}
                                 ${isOverdue ? '<span class="badge badge-danger">Vencida</span>' : ''}
@@ -15206,7 +15213,7 @@ processDiscordCommand() diretamente.
                             ` : ''}
                         </div>
                     </div>
-                    ${(lastEditedAt || (updatedAt && createdAt && (updatedAt.getTime() - createdAt.getTime()) > 15000)) ? `
+                    ${(lastEditedAt || (updatedAt && createdAt && (updatedAt.getTime() - createdAt.getTime()) > 1000)) ? `
                     <div style="background: rgba(255, 170, 0, 0.12); border: 1px solid rgba(255, 170, 0, 0.35); border-radius: 10px; padding: 12px 14px; margin-bottom: 18px;">
                         <div style="color: var(--warning); font-weight: 800; font-size: 13px; margin-bottom: 4px;">
                             <i class="fas fa-pen"></i> Atenção: esta pendência foi editada
